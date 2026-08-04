@@ -197,9 +197,80 @@ function Invoke-SubScript {
   }
 }
 
+# Ctrl+C otherwise kills the process part way through a deployment or a resize, leaving half-built
+# resources behind and printing no summary. Console.CancelKeyPress is unreliable here: in a
+# PowerShell pipeline the run is often torn down anyway even when the handler sets Cancel, so
+# treat Ctrl+C as ordinary console input instead and look for it at each boundary. The keystroke
+# is buffered, so one pressed during a long az call is picked up as soon as that call returns.
+function Enable-CancelWatch {
+  $state = [pscustomobject]@{ Enabled = $false; Previous = $false }
+
+  try {
+    $state.Previous = [Console]::TreatControlCAsInput
+    [Console]::TreatControlCAsInput = $true
+    $state.Enabled = $true
+  }
+  catch {
+    # No console, so the run cannot be interrupted gracefully. Ctrl+C keeps its default behaviour.
+    Write-Line "Ctrl+C will stop this run abruptly: $($_.Exception.Message)" 'Yellow'
+  }
+
+  return $state
+}
+
+function Disable-CancelWatch {
+  param($State)
+
+  if (-not $State -or -not $State.Enabled) { return }
+  try { [Console]::TreatControlCAsInput = $State.Previous } catch { }
+}
+
+# Drains the key buffer looking for Ctrl+C. Only reads when Ctrl+C is being treated as input,
+# otherwise this would swallow keystrokes the operator typed for something else.
+function Test-CancelRequested {
+  if (-not $AbortSignal) { return $false }
+  if ($AbortSignal['cancelled']) { return $true }
+
+  try {
+    if (-not [Console]::TreatControlCAsInput) { return $false }
+
+    while ([Console]::KeyAvailable) {
+      $key = [Console]::ReadKey($true)
+
+      if ($key.Key -eq [ConsoleKey]::C -and ($key.Modifiers -band [ConsoleModifiers]::Control)) {
+        $AbortSignal['cancelled'] = $true
+        $AbortSignal['abort'] = $true
+
+        Write-Line ''
+        Write-Line 'Ctrl+C received. Stopping after the current step.' 'Yellow'
+        return $true
+      }
+    }
+  }
+  catch {
+    # A redirected or closed console cannot be polled. Nothing to do but carry on.
+  }
+
+  return $false
+}
+
 function Test-ShouldStop {
   if (-not $AbortSignal) { return $false }
+
+  Test-CancelRequested | Out-Null
+
   return [bool]$AbortSignal['abort']
+}
+
+function Test-WasCancelled {
+  if (-not $AbortSignal) { return $false }
+  return [bool]$AbortSignal['cancelled']
+}
+
+# Why the run is stopping, so a Ctrl+C is not reported as another instance having failed.
+function Get-StopReason {
+  if (Test-WasCancelled) { return 'cancelled with Ctrl+C' }
+  return 'another instance failed'
 }
 
 # Both the periodic and the final summary print the same table, so they share one writer. Each row
@@ -287,6 +358,8 @@ function Wait-VmReady {
   $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
 
   while ((Get-Date) -lt $deadline) {
+    if (Test-CancelRequested) { throw 'Cancelled while waiting for the router VM to come back.' }
+
     $stateJson = az vm get-instance-view `
       --resource-group $ResourceGroupName `
       --name $VmName `
@@ -316,6 +389,8 @@ function Wait-ForPendingDelete {
   $announced = $false
 
   while ((Get-Date) -lt $deadline) {
+    if (Test-CancelRequested) { throw 'Cancelled while waiting for the resource group to finish deleting.' }
+
     $provisioningState = az group show --name $ResourceGroupName --query properties.provisioningState -o tsv 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $provisioningState -or $provisioningState.Trim() -ne 'Deleting') {
       return
@@ -436,12 +511,22 @@ $summary = [pscustomobject]@{
   Succeeded         = $false
 }
 
+# Standalone runs need their own signal, and they own the console mode. Under the fleet the signal
+# is passed in and the parent owns the mode, but every instance still polls: the parent is blocked
+# in the parallel pipeline and cannot, and the console is process wide so whichever instance sees
+# the keystroke first flips the shared flag for the rest.
+$ownsCancelWatch = -not $AbortSignal
+if ($ownsCancelWatch) {
+  $AbortSignal = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new()
+}
+$cancelWatch = $(if ($ownsCancelWatch) { Enable-CancelWatch } else { $null })
+
 try {
   if ($Deploy) {
     if (Test-ShouldStop) {
       $summary.Status = 'skipped'
-      $summary.Detail = 'another instance failed before this one deployed'
-      Write-Line 'skipping, another instance failed' 'Yellow'
+      $summary.Detail = "skipped, $(Get-StopReason)"
+      Write-Line "skipping, $(Get-StopReason)" 'Yellow'
       if ($PassThru) { return $summary }
       return
     }
@@ -478,13 +563,14 @@ try {
     Write-Line '  baseline       : measured by the first iteration'
   }
   Write-Line ("  iterations     : {0}" -f $(if ($MaxIterations -gt 0) { $MaxIterations } else { 'until a failure' }))
+  if ($ownsCancelWatch -and $cancelWatch.Enabled) { Write-Line '  press Ctrl+C to stop after the current step' }
   Write-Line '##########################################################' 'Cyan'
 
   while ($true) {
     if (Test-ShouldStop) {
-      $summary.Status = 'stopped'
-      $summary.Detail = 'another instance failed'
-      Write-Line 'stopping, another instance failed' 'Yellow'
+      $summary.Status = $(if (Test-WasCancelled) { 'cancelled' } else { 'stopped' })
+      $summary.Detail = Get-StopReason
+      Write-Line "stopping, $(Get-StopReason)" 'Yellow'
       break
     }
 
@@ -611,12 +697,20 @@ try {
   }
 }
 catch {
-  $failureReason = "Iteration ${iteration}: $($_.Exception.Message)"
-
-  if ($summary.Status -in @('pending', 'acceptable')) {
-    $summary.Status = $(if ($iteration -eq 0) { 'setup failed' } else { 'error' })
+  # A cancellation unwinds through here as an ordinary error. It is the operator stopping the run,
+  # not a throughput or infrastructure failure, so it must not be reported as one.
+  if (Test-WasCancelled) {
+    $summary.Status = 'cancelled'
+    $summary.Detail = $_.Exception.Message
   }
-  $summary.Detail = $_.Exception.Message
+  else {
+    $failureReason = "Iteration ${iteration}: $($_.Exception.Message)"
+
+    if ($summary.Status -in @('pending', 'acceptable')) {
+      $summary.Status = $(if ($iteration -eq 0) { 'setup failed' } else { 'error' })
+    }
+    $summary.Detail = $_.Exception.Message
+  }
 
   $results.Add([pscustomobject]@{
       Iteration         = $iteration
@@ -628,8 +722,13 @@ catch {
       TimestampUtc      = (Get-Date).ToUniversalTime()
     })
 }
+finally {
+  if ($ownsCancelWatch) { Disable-CancelWatch -State $cancelWatch }
+}
 
+$wasCancelled = Test-WasCancelled
 if ($failureReason) { $summary.Succeeded = $false }
+if ($wasCancelled) { $summary.Succeeded = $false }
 
 Write-Line ''
 Write-Line '################## run summary ##################' 'Cyan'
@@ -654,6 +753,10 @@ if ($failureReason) {
   Write-Line ''
   Write-Line "STOPPED: $failureReason" 'Red'
 }
+elseif ($wasCancelled) {
+  Write-Line ''
+  Write-Line ("CANCELLED after {0} iterations. The results above are everything that was measured." -f $results.Count) 'Yellow'
+}
 else {
   Write-Line ''
   Write-Line 'All iterations stayed within the acceptable throughput range.' 'Green'
@@ -664,3 +767,7 @@ if ($PassThru) {
 }
 
 if ($failureReason) { exit 1 }
+
+# 130 is the conventional exit code for a run interrupted with Ctrl+C, so a wrapper can tell an
+# operator stopping the run apart from a genuine throughput failure.
+if ($wasCancelled) { exit 130 }

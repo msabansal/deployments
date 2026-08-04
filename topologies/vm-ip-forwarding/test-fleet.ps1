@@ -155,6 +155,23 @@ $resourceGroups = 1..$InstanceCount | ForEach-Object { '{0}-{1:d2}' -f $Resource
 # the first failure, which is the one worth reporting.
 $shared = [System.Collections.Concurrent.ConcurrentDictionary[string, object]]::new()
 $shared['abort'] = $false
+$shared['cancelled'] = $false
+
+# Ctrl+C in the parent would otherwise tear down every runspace part way through a deployment or a
+# resize, leaving half-built resource groups behind and printing no summary. Console.CancelKeyPress
+# is unreliable in a PowerShell pipeline, so Ctrl+C is treated as ordinary console input instead.
+# The parent is blocked in the parallel pipeline and cannot poll, but the console is process wide,
+# so the instances poll and the first to see the keystroke flips the flag the others watch.
+$cancelWatchEnabled = $false
+$previousControlCMode = $false
+try {
+  $previousControlCMode = [Console]::TreatControlCAsInput
+  [Console]::TreatControlCAsInput = $true
+  $cancelWatchEnabled = $true
+}
+catch {
+  Write-Warning "Ctrl+C will stop this run abruptly: $($_.Exception.Message)"
+}
 
 $context = @{
   LoopScript             = $loopScript
@@ -202,9 +219,12 @@ Write-Host "  logs                   : $LogDirectory"
 Write-Host ''
 Write-Host 'Each instance runs test-redeploy-loop.ps1 end to end and independently of the others.'
 Write-Host 'Console lines are prefixed with the resource group and will interleave.'
+Write-Host 'Press Ctrl+C to stop: instances finish their current step, then report what they measured.'
 Write-Host ''
 
 $results = New-Object System.Collections.Generic.List[object]
+
+try {
 
 $resourceGroups | ForEach-Object -ThrottleLimit $MaxParallel -Parallel {
   $rg = $_
@@ -215,6 +235,8 @@ $resourceGroups | ForEach-Object -ThrottleLimit $MaxParallel -Parallel {
   # An instance that has not started yet is skipped outright once another one has failed, so a
   # failing fleet is not left deploying resource groups nobody will look at.
   if ($context.Shared['abort']) {
+    $reason = if ($context.Shared['cancelled']) { 'the run was cancelled with Ctrl+C' } else { 'another instance failed before this one started' }
+
     return [pscustomobject]@{
       ResourceGroupName = $rg
       RouterVmSize      = $null
@@ -222,8 +244,8 @@ $resourceGroups | ForEach-Object -ThrottleLimit $MaxParallel -Parallel {
       LastGbps          = $null
       Iterations        = 0
       RouterChanges     = 0
-      Status            = 'skipped'
-      Detail            = 'another instance failed before this one started'
+      Status            = $(if ($context.Shared['cancelled']) { 'cancelled' } else { 'skipped' })
+      Detail            = $reason
       Succeeded         = $false
       DurationSeconds   = 0
       LogFile           = $logFile
@@ -297,8 +319,10 @@ $resourceGroups | ForEach-Object -ThrottleLimit $MaxParallel -Parallel {
     }
 
     if (-not $summary) {
-      $context.Shared.TryAdd('failureReason', "'$rg' returned no result (see $logFile)") | Out-Null
-      $context.Shared['abort'] = $true
+      if (-not $context.Shared['cancelled']) {
+        $context.Shared.TryAdd('failureReason', "'$rg' returned no result (see $logFile)") | Out-Null
+        $context.Shared['abort'] = $true
+      }
 
       return [pscustomobject]@{
         ResourceGroupName = $rg
@@ -307,15 +331,17 @@ $resourceGroups | ForEach-Object -ThrottleLimit $MaxParallel -Parallel {
         LastGbps          = $null
         Iterations        = 0
         RouterChanges     = 0
-        Status            = 'no result'
-        Detail            = 'the instance returned no result object'
+        Status            = $(if ($context.Shared['cancelled']) { 'cancelled' } else { 'no result' })
+        Detail            = $(if ($context.Shared['cancelled']) { 'stopped before it reported a result' } else { 'the instance returned no result object' })
         Succeeded         = $false
         DurationSeconds   = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
         LogFile           = $logFile
       }
     }
 
-    if (-not $summary.Succeeded) {
+    # A cancelled instance is not a failure. Recording one would make the fleet report a
+    # throughput failure and exit 1, hiding the fact that the operator stopped the run.
+    if (-not $summary.Succeeded -and -not $context.Shared['cancelled']) {
       $context.Shared.TryAdd('failureReason', "'$rg': $($summary.Detail) (see $logFile)") | Out-Null
       $context.Shared['abort'] = $true
     }
@@ -337,8 +363,13 @@ $resourceGroups | ForEach-Object -ThrottleLimit $MaxParallel -Parallel {
   catch {
     $_ | Out-File -LiteralPath $logFile -Encoding utf8 -Append
     Write-Host "[$rg] $($_.Exception.Message)" -ForegroundColor Red
-    $context.Shared.TryAdd('failureReason', "'$rg': $($_.Exception.Message) (see $logFile)") | Out-Null
-    $context.Shared['abort'] = $true
+
+    # A second Ctrl+C tears the runspace down mid-call, which surfaces here. That is the operator
+    # stopping the run, not an instance failing, so it must not become the fleet failure reason.
+    if (-not $context.Shared['cancelled']) {
+      $context.Shared.TryAdd('failureReason', "'$rg': $($_.Exception.Message) (see $logFile)") | Out-Null
+      $context.Shared['abort'] = $true
+    }
 
     return [pscustomobject]@{
       ResourceGroupName = $rg
@@ -347,7 +378,7 @@ $resourceGroups | ForEach-Object -ThrottleLimit $MaxParallel -Parallel {
       LastGbps          = $null
       Iterations        = 0
       RouterChanges     = 0
-      Status            = 'error'
+      Status            = $(if ($context.Shared['cancelled']) { 'cancelled' } else { 'error' })
       Detail            = $_.Exception.Message
       Succeeded         = $false
       DurationSeconds   = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
@@ -355,6 +386,17 @@ $resourceGroups | ForEach-Object -ThrottleLimit $MaxParallel -Parallel {
     }
   }
 } | ForEach-Object { $results.Add($_) }
+
+}
+finally {
+  # Leaving Ctrl+C redirected to the input buffer would break the operator's shell for every
+  # command afterwards, so the mode is restored even when the run throws.
+  if ($cancelWatchEnabled) {
+    try { [Console]::TreatControlCAsInput = $previousControlCMode } catch { }
+  }
+}
+
+$wasCancelled = [bool]$shared['cancelled']
 
 $failureReason = $null
 $shared.TryGetValue('failureReason', [ref] $failureReason) | Out-Null
@@ -387,6 +429,15 @@ if ($failureReason) {
   Write-Host ''
   Write-Host "STOPPED: $failureReason" -ForegroundColor Red
   exit 1
+}
+
+if ($wasCancelled) {
+  Write-Host ''
+  Write-Host 'CANCELLED with Ctrl+C. The results above are everything the instances measured.' -ForegroundColor Yellow
+  if (-not $DeleteResourceGroupsOnExit) {
+    Write-Host "The resource groups were left in place: $($resourceGroups -join ', ')" -ForegroundColor Yellow
+  }
+  exit 130
 }
 
 Write-Host ''

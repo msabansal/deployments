@@ -210,6 +210,23 @@ A redeploy takes several minutes and a rebuild longer still, so budget roughly
 `DurationSeconds + 5 minutes` per iteration. Forwarding survives both because it is persisted in
 the guest: `IPEnableRouter` on Windows and the sysctl drop-in on Linux.
 
+### Stopping a run with Ctrl+C
+
+Press Ctrl+C to stop. The run does not die on the spot: it finishes the step it is on, then
+prints its summary and writes the CSV, so a run interrupted half way still reports everything it
+measured. This matters most during a deployment or a resize, where being killed outright leaves
+half-built resources behind that the next run has to clean up.
+
+Ctrl+C is treated as console input rather than as an interrupt signal, because
+`Console.CancelKeyPress` does not reliably keep a PowerShell pipeline alive - the run gets torn
+down anyway and the summary never prints. The keystroke is buffered, so pressing it during a long
+`az` call registers as soon as that call returns; the scripts also check while polling for a VM to
+come back, which is where most of the waiting happens. A cancelled run exits with code 130 rather
+than 1, so a wrapper can tell an operator stopping the run apart from a throughput failure.
+
+Under the fleet the same keystroke stops every instance, since they share the flag. Resource
+groups are left in place unless `-DeleteResourceGroupsOnExit` was passed.
+
 ### Fleet test across many deployments
 
 `test-fleet.ps1` scales the same idea out. It creates N resource group names from a prefix -
