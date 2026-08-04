@@ -67,6 +67,11 @@ param(
   [ValidateRange(1, 100)]
   [int] $ThresholdPercent = 80,
 
+  # An absolute floor independent of the baseline. A run that collapses to a trickle is a failure
+  # even on the first iteration, where there is no baseline to compare against yet.
+  [ValidateRange(0, 100000)]
+  [double] $MinimumMbps = 100,
+
   # 0 means keep going until an iteration fails.
   [ValidateRange(0, 10000)]
   [int] $MaxIterations = 0,
@@ -145,6 +150,45 @@ function Write-Line {
 
   $text = if ($LogPrefix) { "[$LogPrefix] $Message" } else { $Message }
   Write-Host $text -ForegroundColor $Colour
+}
+
+# The sub-scripts write straight to the host, so their output arrives without the resource group
+# prefix that Write-Line adds. When several instances run at once those bare lines cannot be
+# attributed to an instance, so fold every stream and reprint each line prefixed. Objects on the
+# success stream are passed through untouched so a caller still gets its result.
+function Invoke-SubScript {
+  param([Parameter(Mandatory)] [scriptblock] $Action)
+
+  & $Action *>&1 | ForEach-Object {
+    if ($_ -is [System.Management.Automation.InformationRecord]) {
+      # Write-Host arrives here once the streams are folded together.
+      $message = $_.MessageData
+
+      if ($message -is [System.Management.Automation.HostInformationMessage]) {
+        $colour = if ($message.ForegroundColor) { $message.ForegroundColor } else { 'Gray' }
+        foreach ($line in ([string]$message.Message) -split "`r?`n") { Write-Line $line $colour }
+      }
+      else {
+        foreach ($line in ([string]$message) -split "`r?`n") { Write-Line $line }
+      }
+    }
+    elseif ($_ -is [System.Management.Automation.ErrorRecord]) {
+      foreach ($line in ($_.Exception.Message -split "`r?`n")) { Write-Line $line 'Red' }
+    }
+    elseif ($_ -is [System.Management.Automation.WarningRecord]) {
+      foreach ($line in ($_.Message -split "`r?`n")) { Write-Line $line 'Yellow' }
+    }
+    elseif ($_ -is [System.Management.Automation.VerboseRecord] -or $_ -is [System.Management.Automation.DebugRecord]) {
+      foreach ($line in ($_.Message -split "`r?`n")) { Write-Line $line 'DarkGray' }
+    }
+    elseif ($_ -is [string]) {
+      foreach ($line in ($_ -split "`r?`n")) { Write-Line $line }
+    }
+    else {
+      # A real result object. Hand it back to the caller rather than printing it.
+      $_
+    }
+  }
 }
 
 function Test-ShouldStop {
@@ -233,7 +277,7 @@ function Invoke-Deployment {
   # create-then-resize cycle the initial deployment went through.
   if ($InitialRouterVmSize) { $deployArgs.RouterVmSize = $InitialRouterVmSize }
 
-  & $deployScript @deployArgs
+  Invoke-SubScript { & $deployScript @deployArgs } | Out-Null
 }
 
 # Resizing to the size the VM already runs is a no-op inside resize-router.ps1, so this is safe
@@ -246,12 +290,14 @@ function Invoke-RouterResize {
   Write-Line "resizing the router to $ResizedRouterVmSize..." 'Yellow'
   $started = Get-Date
 
-  & $resizeScript `
-    -ResourceGroupName $ResourceGroupName `
-    -DeploymentName $DeploymentName `
-    -VmName $VmName `
-    -VmSize $ResizedRouterVmSize `
-    -TimeoutMinutes $RouterTimeoutMinutes
+  Invoke-SubScript {
+    & $resizeScript `
+      -ResourceGroupName $ResourceGroupName `
+      -DeploymentName $DeploymentName `
+      -VmName $VmName `
+      -VmSize $ResizedRouterVmSize `
+      -TimeoutMinutes $RouterTimeoutMinutes
+  } | Out-Null
 
   Write-Line ("resized in {0:N0} seconds" -f ((Get-Date) - $started).TotalSeconds) 'Green'
 }
@@ -355,6 +401,7 @@ try {
   Write-Line "  resource group : $ResourceGroupName"
   Write-Line "  router VM      : $routerVmName ($routerVmSize)"
   Write-Line "  acceptance     : at least $ThresholdPercent% of the baseline"
+  if ($MinimumMbps -gt 0) { Write-Line ("  minimum        : {0:N0} Mbits/sec regardless of the baseline" -f $MinimumMbps) }
   Write-Line ("  router change  : {0}" -f $(if ($RouterChange -eq 'None') { 'none' } else { "$RouterChange every $IterationsBeforeChange successful iterations" }))
   if ($BaselineGbps -gt 0) {
     Write-Line ("  baseline       : {0:N2} Gbits/sec (supplied)" -f $BaselineGbps)
@@ -379,19 +426,45 @@ try {
     Write-Line ''
     Write-Line "---------- iteration $iteration ----------" 'Cyan'
 
-    $result = & $testScript `
-      -ResourceGroupName $ResourceGroupName `
-      -DeploymentName $DeploymentName `
-      -ParallelConnections $ParallelConnections `
-      -DurationSeconds $DurationSeconds `
-      -Port $Port `
-      -Reverse:$Reverse `
-      -PassThru
+    $result = Invoke-SubScript {
+      & $testScript `
+        -ResourceGroupName $ResourceGroupName `
+        -DeploymentName $DeploymentName `
+        -ParallelConnections $ParallelConnections `
+        -DurationSeconds $DurationSeconds `
+        -Port $Port `
+        -Reverse:$Reverse `
+        -PassThru
+    } | Select-Object -Last 1
 
     if (-not $result) {
       $failureReason = "Iteration ${iteration}: the throughput test returned no result."
       $summary.Status = 'no result'
       $summary.Detail = 'the connectivity test returned no measurement'
+      break
+    }
+
+    # An absolute floor, checked before the baseline is set. A first iteration that limps in at a
+    # few Mbits/sec would otherwise become the baseline and make every later run look acceptable.
+    $measuredMbps = $result.GbpsSent * 1000.0
+
+    if ($MinimumMbps -gt 0 -and $measuredMbps -lt $MinimumMbps) {
+      $failureReason = 'Iteration {0}: throughput was {1:N1} Mbits/sec, below the {2:N0} Mbits/sec minimum.' -f $iteration, $measuredMbps, $MinimumMbps
+      $summary.LastGbps = [math]::Round($result.GbpsSent, 3)
+      $summary.Status = 'below minimum'
+      $summary.Detail = '{0:N1} Mbits/sec is below the {1:N0} Mbits/sec minimum' -f $measuredMbps, $MinimumMbps
+
+      $results.Add([pscustomobject]@{
+          Iteration         = $iteration
+          GbpsSent          = [math]::Round($result.GbpsSent, 3)
+          PercentOfBaseline = $(if ($BaselineGbps -gt 0) { [math]::Round($result.GbpsSent / $BaselineGbps * 100.0, 1) } else { $null })
+          RouterVmSize      = $routerVmSize
+          Status            = 'below minimum'
+          Detail            = $summary.Detail
+          TimestampUtc      = $result.TimestampUtc
+        })
+
+      Write-Line $failureReason 'Red'
       break
     }
 
@@ -487,6 +560,7 @@ Write-Line '################## run summary ##################' 'Cyan'
 Write-Line ("  resource group : {0}" -f $ResourceGroupName)
 Write-Line ("  baseline       : {0:N2} Gbits/sec" -f $BaselineGbps)
 Write-Line ("  threshold      : {0:N2} Gbits/sec ({1}%)" -f ($BaselineGbps * $threshold), $ThresholdPercent)
+if ($MinimumMbps -gt 0) { Write-Line ("  minimum        : {0:N0} Mbits/sec" -f $MinimumMbps) }
 Write-Line ("  iterations     : {0}" -f $results.Count)
 Write-Line ("  router changes : {0}" -f $routerChanges)
 Write-Line ''

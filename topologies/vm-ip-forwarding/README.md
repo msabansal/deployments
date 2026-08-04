@@ -160,6 +160,10 @@ the throughput test, compare the result with a baseline, and change the router V
 round again. While the result stays at or above 80 percent of the baseline it keeps going, and
 it stops on the first iteration that falls short, which is the placement worth investigating.
 
+There is also an absolute floor, 100 Mbits/sec by default, checked before the baseline is set. A
+percentage threshold alone cannot catch a run that was already broken on its first iteration,
+because that first measurement becomes the baseline and everything after it compares favourably.
+
 ```powershell
 .\test-redeploy-loop.ps1 -ResourceGroupName <resource-group>
 ```
@@ -171,6 +175,7 @@ it stops on the first iteration that falls short, which is the placement worth i
 | `-IterationsBeforeChange <m>` | Successful iterations between router changes. Defaults to 1. |
 | `-BaselineGbps <n>` | Compare against a known figure instead of measuring one on the first iteration. |
 | `-ThresholdPercent <n>` | Acceptance threshold. Defaults to 80. |
+| `-MinimumMbps <n>` | Absolute throughput floor in Mbits/sec, checked before the baseline is set. Defaults to 100. Set to 0 to disable. |
 | `-MaxIterations <n>` | Stop after this many iterations. Defaults to 0, meaning run until a failure. |
 | `-RouterTimeoutMinutes <n>` | How long to wait for the router VM after a redeploy or resize. Defaults to 20. |
 | `-InitialRouterVmSize <sku>` | The SKU router VMs are created on, by `-Deploy` and by a `Recreate`. |
@@ -226,6 +231,7 @@ of the fleet continuing to run.
 | `-RouterTimeoutMinutes <n>` | How long to wait for a router after a resize or rebuild. Defaults to 20. |
 | `-MaxIterations <n>` | Stop after this many iterations. Defaults to 0, meaning run until a failure. |
 | `-ThresholdPercent <n>` | Acceptance threshold against each instance's own baseline. Defaults to 80. |
+| `-MinimumMbps <n>` | Absolute throughput floor in Mbits/sec applied to every instance. Defaults to 100. Set to 0 to disable. |
 | `-BaselineGbps <n>` | Use one fixed baseline for every instance instead of measuring one per instance. |
 | `-SkipDeploy` | Reuse resource groups that are already deployed. |
 | `-MaxParallel <n>` | Limit how many instances are worked on at once. Defaults to all of them. |

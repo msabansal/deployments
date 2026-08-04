@@ -80,6 +80,10 @@ param(
   [ValidateRange(1, 100)]
   [int] $ThresholdPercent = 80,
 
+  # An absolute floor applied to every instance, independent of its baseline.
+  [ValidateRange(0, 100000)]
+  [double] $MinimumMbps = 100,
+
   # Apply the same baseline to every instance instead of measuring one per instance.
   [ValidateRange(0, 1000)]
   [double] $BaselineGbps = 0,
@@ -164,6 +168,7 @@ $context = @{
   ParallelConnections    = $ParallelConnections
   DurationSeconds        = $DurationSeconds
   ThresholdPercent       = $ThresholdPercent
+  MinimumMbps            = $MinimumMbps
   BaselineGbps           = $BaselineGbps
   Deploy                 = -not $SkipDeploy
   Shared                 = $shared
@@ -184,6 +189,7 @@ if ($ResizedRouterVmSize) {
 }
 Write-Host "  test                   : $ParallelConnections streams for $DurationSeconds seconds"
 Write-Host "  acceptance             : at least $ThresholdPercent% of each instance baseline"
+if ($MinimumMbps -gt 0) { Write-Host ("  minimum                : {0:N0} Mbits/sec regardless of the baseline" -f $MinimumMbps) }
 Write-Host ("  router change          : {0}" -f $(if ($RouterChange -eq 'None') { 'none' } else { "$RouterChange every $IterationsBeforeChange successful iterations" }))
 Write-Host ("  iterations             : {0}" -f $(if ($MaxIterations -gt 0) { $MaxIterations } else { 'until a failure' }))
 Write-Host "  concurrency            : $MaxParallel instances at a time"
@@ -232,6 +238,7 @@ $resourceGroups | ForEach-Object -ThrottleLimit $MaxParallel -Parallel {
     ParallelConnections    = $context.ParallelConnections
     DurationSeconds        = $context.DurationSeconds
     ThresholdPercent       = $context.ThresholdPercent
+    MinimumMbps            = $context.MinimumMbps
     BaselineGbps           = $context.BaselineGbps
     LogPrefix              = $rg
     AbortSignal            = $context.Shared
