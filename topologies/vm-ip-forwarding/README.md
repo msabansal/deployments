@@ -54,6 +54,7 @@ by the operating system.
 - `modules/linux-vm.bicep` - Azure Linux 4 VM used for both endpoints and the Linux router
 - `modules/windows-router-vm.bicep` - Windows Server 2022 router VM
 - `deploy.ps1` - deployment wrapper that reads the SSH key from `~\.ssh\id_ed25519.pub`
+- `diagnose.ps1` - inspects, and optionally repairs, forwarding state on a deployed router VM
 
 ## Deploy
 
@@ -115,6 +116,45 @@ Confirm forwarding state on a Windows router:
 Get-NetIPInterface -AddressFamily IPv4 | Select-Object InterfaceAlias, Forwarding
 Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name IPEnableRouter
 ```
+
+## Troubleshooting
+
+### TCP never establishes and the router sees a single SYN with no retransmits
+
+That signature means the router received the SYN, refused to forward it, and answered with an
+ICMP administratively-prohibited message, so the client gave up instead of retransmitting. It
+is a guest firewall problem, not an Azure routing problem — if Azure routing were wrong, no
+SYN would reach the router at all.
+
+The usual cause is `firewalld`. When `firewalld` is running it installs its rules into its own
+`inet firewalld` nftables table and rejects forwarded traffic inside a zone by default. A plain
+`iptables -I FORWARD 1 -j ACCEPT` writes to a *different* table and therefore does not override
+it. Forwarding has to be allowed through `firewalld` itself:
+
+```bash
+sudo firewall-cmd --permanent --add-forward
+sudo firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -j ACCEPT
+sudo firewall-cmd --reload
+```
+
+Inspect the live router, or inspect and repair it in place, with:
+
+```powershell
+.\diagnose.ps1 -ResourceGroupName <resource-group> -RouterVmName <router-vm>
+.\diagnose.ps1 -ResourceGroupName <resource-group> -RouterVmName <router-vm> -Repair
+```
+
+Redeploying with `deploy.ps1` also applies the fix, because the run command re-executes when
+its script changes.
+
+### Checklist for other failure modes
+
+| Symptom | Check |
+| --- | --- |
+| No SYN reaches the router at all | Effective routes on the endpoint NIC: `az network nic show-effective-route-table`. The `10.30.x.0/24` route must show next hop `10.30.0.4`. |
+| SYN reaches the router and is forwarded, but nothing comes back | The *other* endpoint's route table, and `enableIPForwarding` on the router NIC. Azure drops transit packets when that flag is off. |
+| Traffic works but bypasses the router after the first packet | ICMP redirects. The router must have `send_redirects=0` and the endpoints `accept_redirects=0`. These are per-interface settings, so the `all` and `default` sysctl keys alone are not enough. |
+| Connection refused immediately from the far endpoint | Nothing is listening, or the guest firewall on the destination blocks the port. The deployment opens `5000-6000` only. |
 
 ## Notes and constraints
 

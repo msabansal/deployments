@@ -35,10 +35,11 @@ param testPortRangeStart int
 @description('Last port of the test traffic range opened in the guest firewall.')
 param testPortRangeEnd int
 
-var baseScript = '''
+var rawScript = '''
 #!/bin/bash
 set -euo pipefail
 
+ROLE=__ROLE__
 PORT_START=__PORT_START__
 PORT_END=__PORT_END__
 
@@ -57,52 +58,90 @@ for optional in iproute iputils traceroute nmap-ncat bind-utils iptables; do
   $PKG install -y "$optional" || echo "optional package $optional was not installed"
 done
 
-if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
-  firewall-cmd --permanent --add-port=${PORT_START}-${PORT_END}/tcp
-  firewall-cmd --permanent --add-port=${PORT_START}-${PORT_END}/udp
-  firewall-cmd --permanent --add-protocol=icmp || true
-  firewall-cmd --reload
-elif command -v iptables >/dev/null 2>&1; then
-  iptables -C INPUT -p tcp --dport ${PORT_START}:${PORT_END} -j ACCEPT 2>/dev/null \
-    || iptables -I INPUT 1 -p tcp --dport ${PORT_START}:${PORT_END} -j ACCEPT
-  iptables -C INPUT -p udp --dport ${PORT_START}:${PORT_END} -j ACCEPT 2>/dev/null \
-    || iptables -I INPUT 1 -p udp --dport ${PORT_START}:${PORT_END} -j ACCEPT
-  iptables -C INPUT -p icmp -j ACCEPT 2>/dev/null \
-    || iptables -I INPUT 1 -p icmp -j ACCEPT
-fi
-'''
-
-// ICMP redirects are ignored so that traffic keeps traversing the router VM even though the
-// router forwards packets back out of the interface they arrived on.
-var endpointScript = '''
-cat >/etc/sysctl.d/99-topology-endpoint.conf <<'SYSCTL'
-net.ipv4.conf.all.accept_redirects = 0
-net.ipv4.conf.default.accept_redirects = 0
-net.ipv6.conf.all.accept_redirects = 0
-SYSCTL
-sysctl --system
-'''
-
-var routerScript = '''
-cat >/etc/sysctl.d/99-topology-router.conf <<'SYSCTL'
+if [ "$ROLE" = "router" ]; then
+  cat >/etc/sysctl.d/99-topology-router.conf <<'SYSCTL'
 net.ipv4.ip_forward = 1
-net.ipv4.conf.all.forwarding = 1
 net.ipv6.conf.all.forwarding = 1
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
 net.ipv4.conf.all.send_redirects = 0
 net.ipv4.conf.default.send_redirects = 0
 SYSCTL
-sysctl --system
 
-iptables -P FORWARD ACCEPT
-iptables -C FORWARD -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -j ACCEPT
-'''
+  # rp_filter and send_redirects are per-interface settings. Writing the "all" and
+  # "default" keys does not change interfaces that already exist, so pin each one.
+  for dir in /proc/sys/net/ipv4/conf/*/; do
+    iface=$(basename "$dir")
+    case "$iface" in
+      all|default) continue ;;
+    esac
+    echo "net.ipv4.conf.${iface}.rp_filter = 0" >>/etc/sysctl.d/99-topology-router.conf
+    echo "net.ipv4.conf.${iface}.send_redirects = 0" >>/etc/sysctl.d/99-topology-router.conf
+  done
+else
+  cat >/etc/sysctl.d/99-topology-endpoint.conf <<'SYSCTL'
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+SYSCTL
+fi
 
-var persistScript = '''
-if command -v iptables-save >/dev/null 2>&1; then
-  mkdir -p /etc/systemd/scripts
-  iptables-save > /etc/systemd/scripts/ip4save || true
+sysctl --system >/dev/null
+
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+  firewall-cmd --permanent --add-port=${PORT_START}-${PORT_END}/tcp
+  firewall-cmd --permanent --add-port=${PORT_START}-${PORT_END}/udp
+  firewall-cmd --permanent --add-protocol=icmp || true
+
+  if [ "$ROLE" = "router" ]; then
+    # firewalld runs on its own nftables table, so plain iptables FORWARD rules cannot
+    # override it. Intra-zone forwarding must be allowed through firewalld itself, and
+    # the direct rule keeps forwarding working across a firewall-cmd --reload.
+    firewall-cmd --permanent --add-forward || true
+    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -j ACCEPT || true
+    firewall-cmd --permanent --direct --add-rule ipv6 filter FORWARD 0 -j ACCEPT || true
+  fi
+
+  firewall-cmd --reload
+fi
+
+# Applied whether or not firewalld is present, because some images ship a bare
+# iptables/nftables ruleset with no firewalld service.
+if command -v iptables >/dev/null 2>&1; then
+  ensure_input() {
+    if ! iptables -C INPUT "$@" -j ACCEPT 2>/dev/null; then
+      iptables -I INPUT 1 "$@" -j ACCEPT
+    fi
+  }
+
+  ensure_input -p tcp --dport ${PORT_START}:${PORT_END}
+  ensure_input -p udp --dport ${PORT_START}:${PORT_END}
+  ensure_input -p icmp
+
+  if [ "$ROLE" = "router" ]; then
+    iptables -P FORWARD ACCEPT || true
+    if ! iptables -C FORWARD -j ACCEPT 2>/dev/null; then
+      iptables -I FORWARD 1 -j ACCEPT
+    fi
+  fi
+
+  if command -v iptables-save >/dev/null 2>&1; then
+    mkdir -p /etc/systemd/scripts
+    iptables-save >/etc/systemd/scripts/ip4save || true
+  fi
+fi
+
+if [ "$ROLE" = "router" ]; then
+  forwarding=$(cat /proc/sys/net/ipv4/ip_forward)
+  echo "ip_forward=${forwarding}"
+  if [ "$forwarding" != "1" ]; then
+    echo "IP forwarding is not enabled on the router VM" >&2
+    exit 1
+  fi
+
+  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+    echo "firewalld forward policy: $(firewall-cmd --query-forward || true)"
+  fi
 fi
 
 echo "configuration complete"
@@ -110,7 +149,7 @@ echo "configuration complete"
 
 var script = replace(
   replace(
-    '${baseScript}${configureOsForwarding ? routerScript : endpointScript}${persistScript}',
+    replace(rawScript, '__ROLE__', configureOsForwarding ? 'router' : 'endpoint'),
     '__PORT_START__',
     string(testPortRangeStart)
   ),
