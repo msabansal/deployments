@@ -11,7 +11,15 @@ param(
 
   [string] $SshPublicKeyPath = '~\.ssh\id_ed25519.pub',
 
-  [securestring] $RouterAdminPassword
+  [securestring] $RouterAdminPassword,
+
+  [switch] $RunConnectivityTest,
+
+  [ValidateRange(1, 128)]
+  [int] $ParallelConnections = 8,
+
+  [ValidateRange(5, 3600)]
+  [int] $DurationSeconds = 60
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,4 +68,16 @@ az deployment group create `
 
 if ($LASTEXITCODE -ne 0) {
   throw "Azure deployment failed with exit code $LASTEXITCODE."
+}
+
+if ($RunConnectivityTest) {
+  Write-Host ''
+  Write-Host 'Deployment complete. Running the connectivity test...'
+  Write-Host ''
+
+  & "$PSScriptRoot\test-connectivity.ps1" `
+    -ResourceGroupName $ResourceGroupName `
+    -DeploymentName 'vm-ip-forwarding' `
+    -ParallelConnections $ParallelConnections `
+    -DurationSeconds $DurationSeconds
 }

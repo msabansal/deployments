@@ -54,6 +54,7 @@ by the operating system.
 - `modules/linux-vm.bicep` - Azure Linux 4 VM used for both endpoints and the Linux router
 - `modules/windows-router-vm.bicep` - Windows Server 2022 router VM
 - `deploy.ps1` - deployment wrapper that reads the SSH key from `~\.ssh\id_ed25519.pub`
+- `test-connectivity.ps1` - iperf3 throughput test between the endpoints, through the router
 - `diagnose.ps1` - inspects, and optionally repairs, forwarding state on a deployed router VM
 
 ## Deploy
@@ -77,6 +78,58 @@ The deployment outputs the private and public IP of every VM along with the conf
 port range.
 
 ## Verify forwarding
+
+### Automated throughput test
+
+`test-connectivity.ps1` runs the whole verification end to end: it confirms the first hop
+from endpoint A is the router, starts an iperf3 server on endpoint B, drives a parallel-stream
+test for 60 seconds, captures packets on the router while the test runs, and prints a
+throughput summary.
+
+```powershell
+.\test-connectivity.ps1 -ResourceGroupName <resource-group>
+```
+
+To deploy and test in one step:
+
+```powershell
+.\deploy.ps1 -ResourceGroupName <resource-group> -Location <location> -RunConnectivityTest
+```
+
+Useful switches:
+
+| Switch | Purpose |
+| --- | --- |
+| `-ParallelConnections <n>` | Number of concurrent TCP streams. Defaults to 8. |
+| `-DurationSeconds <n>` | Test length. Defaults to 60. |
+| `-Reverse` | Measure server-to-client instead of client-to-server. |
+| `-Port <n>` | iperf3 port. Defaults to 5201, which is inside the open `5000-6000` range. |
+| `-SkipPathCheck` | Skip the traceroute first-hop check. |
+
+Sample output:
+
+```
+================ throughput summary ================
+  path                 : 10.30.1.4 -> 10.30.0.4 -> 10.30.2.4
+  direction            : client to server
+  parallel streams     : 8
+  duration             : 60.0 seconds
+  bytes sent           : 65.19 GB
+  throughput sent      : 9.40 Gbits/sec
+  throughput received  : 9.39 Gbits/sec
+  TCP retransmits      : 12
+  client CPU (sender)  : 45.2 %
+  server CPU (receiver): 38.1 %
+  packets seen on router: 4,812,904
+  traffic confirmed to traverse the router.
+====================================================
+```
+
+The packet count is the important line: it proves the traffic really transited the router
+rather than taking a direct intra-VNet path. The router capture is only taken when the router
+runs Linux, because the Windows router image has no `tcpdump`.
+
+### Manual checks
 
 SSH to endpoint A using its public IP, then confirm the path goes through the router:
 
