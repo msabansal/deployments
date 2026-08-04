@@ -1,0 +1,32 @@
+# Compiled / generated ARM output
+*.json.bicep
+main.json
+*.build.json
+bicepconfig.local.json
+
+# Local parameter overrides that may contain environment-specific or secret values
+*.local.bicepparam
+*.local.parameters.json
+local.settings.json
+.env
+.env.*
+
+# Keys and certificates
+*.pem
+*.key
+*.pfx
+*.publishsettings
+id_*.pub
+
+# Tool and editor state
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs and scratch output
+*.log
+out/
+artifacts/
+tmp/

@@ -1,0 +1,63 @@
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory)]
+  [string] $ResourceGroupName,
+
+  [Parameter(Mandatory)]
+  [string] $Location,
+
+  [ValidateSet('AzureLinux', 'WindowsServer2022')]
+  [string] $RouterOs = 'AzureLinux',
+
+  [string] $SshPublicKeyPath = '~\.ssh\id_ed25519.pub',
+
+  [securestring] $RouterAdminPassword
+)
+
+$ErrorActionPreference = 'Stop'
+
+$resolvedKeyPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SshPublicKeyPath)
+if (-not (Test-Path -LiteralPath $resolvedKeyPath -PathType Leaf)) {
+  throw "SSH public key file was not found: $resolvedKeyPath"
+}
+
+$publicKey = (Get-Content -LiteralPath $resolvedKeyPath -Raw).Trim()
+
+$deploymentParameters = @(
+  "location=$Location"
+  "routerOs=$RouterOs"
+  "adminPublicKey=$publicKey"
+)
+
+if ($RouterOs -eq 'WindowsServer2022') {
+  if (-not $RouterAdminPassword) {
+    $RouterAdminPassword = Read-Host -AsSecureString -Prompt 'Administrator password for the Windows router VM'
+  }
+
+  $plainPassword = [System.Net.NetworkCredential]::new('', $RouterAdminPassword).Password
+  if ([string]::IsNullOrWhiteSpace($plainPassword)) {
+    throw 'A router administrator password is required when RouterOs is WindowsServer2022.'
+  }
+
+  $deploymentParameters += "routerAdminPassword=$plainPassword"
+}
+
+az group create `
+  --name $ResourceGroupName `
+  --location $Location `
+  --output none
+
+if ($LASTEXITCODE -ne 0) {
+  throw "Resource group creation failed with exit code $LASTEXITCODE."
+}
+
+az deployment group create `
+  --resource-group $ResourceGroupName `
+  --name 'vm-ip-forwarding' `
+  --template-file "$PSScriptRoot\main.bicep" `
+  --parameters "$PSScriptRoot\main.bicepparam" `
+  --parameters $deploymentParameters
+
+if ($LASTEXITCODE -ne 0) {
+  throw "Azure deployment failed with exit code $LASTEXITCODE."
+}
