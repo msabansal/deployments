@@ -317,6 +317,16 @@ also lands it on a new host. Forwarding survives because it is persisted on the 
 re-applied at boot, and the NIC keeps the static address. Resizing to the size the VM already
 runs is a no-op, so the resize phase is safe to repeat and safe to use with `-SkipDeploy`.
 
+The disk controller is handled along the way. The v6 families boot from NVMe only, while Dv2 and
+Dv5 boot from SCSI only, so a resize between them fails with `cannot boot with DiskControllerType`
+unless the controller moves at the same time. `resize-router.ps1` reads the controllers the target
+size accepts, compares them with the one the VM currently uses, and when they do not overlap it
+changes the size and the controller in a single `az vm update` rather than calling `az vm resize`.
+This works in both directions, so a loop that recreates on `Standard_DS2_v2` and resizes up to
+`Standard_D2s_v6` on every iteration keeps working. Both images this topology uses advertise SCSI
+and NVMe; the script checks the image before switching and fails with a clear message if a custom
+image does not support the controller the target size needs.
+
 The single-resource-group loop takes the same pair of switches, where the size cycle replaces the
 redeploy for every iteration:
 
