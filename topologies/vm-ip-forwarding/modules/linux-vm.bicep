@@ -152,6 +152,7 @@ if command -v iptables >/dev/null 2>&1; then
 fi
 
 if [ "$ROLE" = "router" ]; then
+  forwarding_ok=1
   forwarding=$(cat /proc/sys/net/ipv4/ip_forward)
   echo "ip_forward=${forwarding}"
   if [ "$forwarding" != "1" ]; then
@@ -161,27 +162,46 @@ if [ "$ROLE" = "router" ]; then
 
   if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
     ZONE=$(firewall-cmd --get-default-zone)
-    echo "firewalld zone target: $(firewall-cmd --permanent --zone="$ZONE" --get-target || true)"
+    target=$(firewall-cmd --permanent --zone="$ZONE" --get-target 2>/dev/null || echo unknown)
+    echo "firewalld zone target: ${target}"
     echo "firewalld intra-zone forward: $(firewall-cmd --zone="$ZONE" --query-forward || true)"
-  fi
 
-  # Fail loudly rather than leaving a router that silently answers every SYN with
-  # "ICMP administratively prohibited".
-  if command -v nft >/dev/null 2>&1; then
-    forward_rules=$(nft -a list ruleset 2>/dev/null | sed -n '/chain .*[Ff][Oo][Rr][Ww][Aa][Rr][Dd]/,/^\s*}/p' || true)
-    if echo "$forward_rules" | grep -qiE 'reject|drop'; then
-      echo "A reject or drop rule remains in an nftables forward chain:" >&2
-      echo "$forward_rules" >&2
-      exit 1
+    # firewalld always keeps a trailing "reject with icmpx admin-prohibited" at the end of
+    # filter_FORWARD, and that rule cannot be removed while firewalld is running. It is only
+    # ever reached when nothing accepted the packet earlier, so what has to be verified is
+    # that the zone target is ACCEPT, which makes firewalld put a catch-all accept in the
+    # policy chain that runs first. Scanning the ruleset for the words reject or drop instead
+    # would flag both that unreachable rule and legitimate ones such as "ct state invalid drop".
+    if [ "$target" != "ACCEPT" ]; then
+      echo "firewalld zone ${ZONE} has target ${target}; transit traffic would be rejected with ICMP admin-prohibited" >&2
+      forwarding_ok=0
     fi
-  fi
 
-  if command -v iptables >/dev/null 2>&1; then
-    if iptables -S FORWARD 2>/dev/null | grep -qE '^-A FORWARD .*-j (REJECT|DROP)'; then
-      echo "A reject or drop rule remains in the iptables FORWARD chain:" >&2
+    if command -v nft >/dev/null 2>&1; then
+      policy_chain=$(nft list chain inet firewalld filter_FORWARD_POLICIES 2>/dev/null || true)
+      if [ -n "$policy_chain" ] && ! echo "$policy_chain" | grep -qE '^[[:space:]]*accept([[:space:]]|$)'; then
+        echo "the firewalld forward policy chain has no catch-all accept, so the trailing reject is reachable:" >&2
+        echo "$policy_chain" >&2
+        forwarding_ok=0
+      fi
+    fi
+  elif command -v iptables >/dev/null 2>&1; then
+    # No firewalld, so the FORWARD chain is the whole story.
+    if iptables -S FORWARD 2>/dev/null | grep -qE '^-P FORWARD (DROP|REJECT)'; then
+      echo "the iptables FORWARD policy is not ACCEPT" >&2
       iptables -S FORWARD >&2
-      exit 1
+      forwarding_ok=0
     fi
+
+    if iptables -S FORWARD 2>/dev/null | grep -qE '^-A FORWARD -j (REJECT|DROP)$'; then
+      echo "an unconditional REJECT or DROP remains in the iptables FORWARD chain" >&2
+      iptables -S FORWARD >&2
+      forwarding_ok=0
+    fi
+  fi
+
+  if [ "$forwarding_ok" != "1" ]; then
+    exit 1
   fi
 
   echo "router forwarding path is clear"

@@ -30,3 +30,4 @@ Thumbs.db
 out/
 artifacts/
 tmp/
+fleet-logs-*

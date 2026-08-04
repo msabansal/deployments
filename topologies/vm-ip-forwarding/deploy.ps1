@@ -11,6 +11,14 @@ param(
 
   [string] $SshPublicKeyPath = '~\.ssh\id_ed25519.pub',
 
+  # Overrides the router size baked into main.bicepparam. The endpoint VMs are unaffected.
+  [string] $RouterVmSize,
+
+  # When set, the router is resized to this SKU once the deployment finishes, before anything is
+  # measured. Combined with -RouterVmSize this creates the router on one size and moves it to
+  # another, which is the cycle the fleet and loop tests repeat on every rebuild.
+  [string] $ResizedRouterVmSize,
+
   [securestring] $RouterAdminPassword,
 
   [switch] $RunConnectivityTest,
@@ -36,6 +44,10 @@ $deploymentParameters = @(
   "routerOs=$RouterOs"
   "adminPublicKey=$publicKey"
 )
+
+if ($RouterVmSize) {
+  $deploymentParameters += "routerVmSize=$RouterVmSize"
+}
 
 if ($RouterOs -eq 'WindowsServer2022') {
   if (-not $RouterAdminPassword) {
@@ -68,6 +80,14 @@ az deployment group create `
 
 if ($LASTEXITCODE -ne 0) {
   throw "Azure deployment failed with exit code $LASTEXITCODE."
+}
+
+if ($ResizedRouterVmSize) {
+  Write-Host ''
+  & "$PSScriptRoot\resize-router.ps1" `
+    -ResourceGroupName $ResourceGroupName `
+    -DeploymentName 'vm-ip-forwarding' `
+    -VmSize $ResizedRouterVmSize
 }
 
 if ($RunConnectivityTest) {

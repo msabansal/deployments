@@ -49,6 +49,15 @@ param(
 
   [switch] $Reverse,
 
+  # When set together with -ResizedRouterVmSize, each iteration puts the router back on this SKU
+  # before resizing it up again, so every run repeats the same size cycle.
+  [string] $InitialRouterVmSize,
+
+  # When set, the router is moved to this SKU before every run, so throughput is always measured
+  # on it. Combined with -InitialRouterVmSize this replaces the plain redeploy with a full
+  # downsize-then-upsize cycle.
+  [string] $ResizedRouterVmSize,
+
   # Minutes to wait for the router VM to come back after a redeploy.
   [ValidateRange(1, 120)]
   [int] $RedeployTimeoutMinutes = 20,
@@ -62,6 +71,17 @@ $ErrorActionPreference = 'Stop'
 $testScript = Join-Path $PSScriptRoot 'test-connectivity.ps1'
 if (-not (Test-Path -LiteralPath $testScript)) {
   throw "Could not find test-connectivity.ps1 next to this script."
+}
+
+$resizeScript = Join-Path $PSScriptRoot 'resize-router.ps1'
+$cycleSizes = @($InitialRouterVmSize, $ResizedRouterVmSize) | Where-Object { $_ }
+
+if ($cycleSizes -and -not (Test-Path -LiteralPath $resizeScript)) {
+  throw "Could not find resize-router.ps1 next to this script."
+}
+
+if ($InitialRouterVmSize -and $InitialRouterVmSize -eq $ResizedRouterVmSize) {
+  throw 'InitialRouterVmSize and ResizedRouterVmSize are the same, so there is nothing to cycle.'
 }
 
 function Get-RouterVmName {
@@ -129,11 +149,27 @@ $results = New-Object System.Collections.Generic.List[object]
 $iteration = 0
 $failureReason = $null
 
+# Puts the router through the configured size cycle. Each step is a no-op when the VM already
+# runs that size, so the function is safe to call before every iteration.
+function Invoke-RouterSizeCycle {
+  foreach ($size in $cycleSizes) {
+    & $resizeScript `
+      -ResourceGroupName $ResourceGroupName `
+      -DeploymentName $DeploymentName `
+      -VmName $routerVmName `
+      -VmSize $size `
+      -TimeoutMinutes $RedeployTimeoutMinutes
+  }
+}
+
 Write-Host ''
 Write-Host '########## continuous forwarding throughput test ##########' -ForegroundColor Cyan
 Write-Host "  resource group : $ResourceGroupName"
 Write-Host "  router VM      : $routerVmName"
 Write-Host "  acceptance     : at least $ThresholdPercent% of the baseline"
+if ($cycleSizes) {
+  Write-Host "  size cycle     : $($cycleSizes -join ' -> ') before every iteration"
+}
 if ($BaselineGbps -gt 0) {
   Write-Host ("  baseline       : {0:N2} Gbits/sec (supplied)" -f $BaselineGbps)
 }
@@ -149,9 +185,17 @@ while ($true) {
   Write-Host ''
   Write-Host "---------- iteration $iteration ----------" -ForegroundColor Cyan
 
-  if ($iteration -gt 1) {
+  if ($iteration -gt 1 -or $cycleSizes) {
     try {
-      Invoke-RouterRedeploy -VmName $routerVmName
+      if ($cycleSizes) {
+        # The size cycle already deallocates and restarts the VM, which also lands it on a new
+        # host, so it replaces the redeploy rather than being stacked on top of it. It runs
+        # before the first iteration too, so every measurement is taken on the same size.
+        Invoke-RouterSizeCycle
+      }
+      else {
+        Invoke-RouterRedeploy -VmName $routerVmName
+      }
     }
     catch {
       $failureReason = "Iteration ${iteration}: $($_.Exception.Message)"
@@ -159,7 +203,7 @@ while ($true) {
           Iteration    = $iteration
           GbpsSent     = $null
           PercentOfBaseline = $null
-          Status       = 'redeploy failed'
+          Status       = 'router change failed'
           Detail       = $_.Exception.Message
           TimestampUtc = (Get-Date).ToUniversalTime()
         })

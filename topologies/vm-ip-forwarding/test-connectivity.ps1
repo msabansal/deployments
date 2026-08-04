@@ -8,8 +8,9 @@
   that first verifies the next hop towards endpoint B is the router and then runs a parallel
   stream iperf3 test. Because both steps live in the same script, a failed path check aborts
   the run before any traffic is measured, so a throughput number is only ever reported for
-  traffic that actually went through the router. When the router is Linux a packet capture runs
-  alongside the test as a second, independent confirmation.
+  traffic that actually went through the router. When the router is Linux the kernel's
+  ForwDatagrams counter is sampled either side of the test as a second, independent
+  confirmation that the router forwarded the traffic itself.
 
 .EXAMPLE
   .\test-connectivity.ps1 -ResourceGroupName rg-fwd
@@ -159,21 +160,27 @@ if ($serverResult.Stderr) {
 }
 
 try {
-  $captureSeconds = $DurationSeconds + 15
   $routerIsLinux = $routerOs -ne 'WindowsServer2022'
 
+  # Reading the kernel's own forwarding counter is a far better proof that the router did the
+  # work than capturing packets. With Accelerated Networking the VF handles the traffic and
+  # tcpdump on the synthetic interface sees none of it, so a capture reports zero packets even
+  # while the router is forwarding at line rate.
+  $forwardCounterScript = @'
+grep '^Ip:' /proc/net/snmp | head -2 | awk 'NR==1 { for (i = 1; i <= NF; i++) if ($i == "ForwDatagrams") c = i } NR==2 { print $c }'
+'@
+
+  $forwardedBefore = $null
   if ($routerIsLinux) {
-    Write-Host 'Starting a packet capture on the router...'
-
-    $captureScript = @'
-pkill -f "tcpdump -ni" 2>/dev/null || true
-rm -f /tmp/router-capture.count
-nohup sh -c "timeout __SECONDS__ tcpdump -ni any -q 'host __IP_A__ and host __IP_B__' 2>/dev/null | wc -l > /tmp/router-capture.count" >/dev/null 2>&1 &
-sleep 2
-echo "capture running for __SECONDS__ seconds"
-'@ -replace '__SECONDS__', $captureSeconds -replace '__IP_A__', $endpointAIp -replace '__IP_B__', $endpointBIp
-
-    (Invoke-VmShellScript -VmName $routerVm -Script $captureScript) | Out-Null
+    $value = (Invoke-VmShellScript -VmName $routerVm -Script $forwardCounterScript).Stdout.Trim()
+    $parsed = 0L
+    if ([long]::TryParse($value, [ref] $parsed)) {
+      $forwardedBefore = $parsed
+      Write-Host "Router has forwarded $('{0:N0}' -f $parsed) datagrams so far."
+    }
+    else {
+      Write-Warning "Could not read the router's forwarding counter, so the forwarded datagram check is skipped."
+    }
   }
 
   $direction = if ($Reverse) { '--reverse' } else { '' }
@@ -271,16 +278,13 @@ PYEOF
   $cpu = $report.end.cpu_utilization_percent
   $streamCount = @($report.end.streams).Count
 
-  $capturedPackets = $null
-  if ($routerIsLinux) {
-    $countScript = @'
-for i in $(seq 1 20); do
-  if [ -s /tmp/router-capture.count ]; then break; fi
-  sleep 1
-done
-cat /tmp/router-capture.count 2>/dev/null || echo 0
-'@
-    $capturedPackets = (Invoke-VmShellScript -VmName $routerVm -Script $countScript).Stdout.Trim()
+  $forwardedDatagrams = $null
+  if ($null -ne $forwardedBefore) {
+    $value = (Invoke-VmShellScript -VmName $routerVm -Script $forwardCounterScript).Stdout.Trim()
+    $parsed = 0L
+    if ([long]::TryParse($value, [ref] $parsed)) {
+      $forwardedDatagrams = $parsed - $forwardedBefore
+    }
   }
 
   Write-Host ''
@@ -300,14 +304,13 @@ cat /tmp/router-capture.count 2>/dev/null || echo 0
     Write-Host ("  server CPU (receiver): {0:N1} %" -f $cpu.remote_total)
   }
 
-  if ($null -ne $capturedPackets) {
-    $packetCount = 0
-    if ([int]::TryParse($capturedPackets, [ref] $packetCount) -and $packetCount -gt 0) {
-      Write-Host ("  packets seen on router: {0:N0}" -f $packetCount) -ForegroundColor Green
-      Write-Host '  traffic confirmed to traverse the router.' -ForegroundColor Green
+  if ($null -ne $forwardedDatagrams) {
+    if ($forwardedDatagrams -gt 0) {
+      Write-Host ("  datagrams forwarded   : {0:N0}" -f $forwardedDatagrams) -ForegroundColor Green
+      Write-Host '  the router forwarded the traffic in its own IP stack.' -ForegroundColor Green
     }
     else {
-      throw "The router captured no packets between $endpointAIp and $endpointBIp, so the traffic did not traverse it."
+      throw "The router's ForwDatagrams counter did not increase during the test, so it did not forward the traffic."
     }
   }
 
@@ -343,14 +346,22 @@ cat /tmp/router-capture.count 2>/dev/null || echo 0
       GbpsSent             = [math]::Round($sent.bits_per_second / 1e9, 3)
       GbpsReceived         = [math]::Round($received.bits_per_second / 1e9, 3)
       Retransmits          = $sent.retransmits
-      RouterPacketsCaptured = $capturedPackets
+      ForwardedDatagrams   = $forwardedDatagrams
       TimestampUtc         = (Get-Date).ToUniversalTime()
     }
   }
 }
 finally {
+  # Stopping the server is best effort. A cleanup error must not turn a test that already
+  # produced a measurement into a failure, and the VM may legitimately be gone by now, for
+  # example when the resource group is being torn down.
   Write-Host ''
   Write-Host 'Cleaning up...'
-  Invoke-VmShellScript -VmName $endpointBVm -Script "pkill -f 'iperf3 -s' 2>/dev/null || true; echo stopped" | Out-Null
-  Write-Host '  iperf3 server stopped.'
+  try {
+    Invoke-VmShellScript -VmName $endpointBVm -Script "pkill -f 'iperf3 -s' 2>/dev/null || true; echo stopped" | Out-Null
+    Write-Host '  iperf3 server stopped.'
+  }
+  catch {
+    Write-Warning "  could not stop the iperf3 server on $endpointBVm : $($_.Exception.Message)"
+  }
 }
