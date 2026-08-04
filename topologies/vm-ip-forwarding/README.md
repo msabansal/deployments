@@ -36,7 +36,7 @@ forwarding inside the guest.
   - Accelerated Networking on the NIC
   - Azure `enableIPForwarding` on the NIC, so Azure does not drop transit packets
   - guest-OS forwarding: `net.ipv4.ip_forward` on Linux, `IPEnableRouter` plus per-interface
-    forwarding and the Routing role on Windows
+    `Set-NetIPInterface -Forwarding Enabled` on Windows
 - NSGs allowing `CorpnetPublic`, `CorpnetSAW`, the VNet-wide test port range, and
   `VirtualNetwork`, then denying all other inbound traffic
 - Guest firewall rules opening TCP and UDP `5000-6000` and ICMP echo on every VM
@@ -166,8 +166,12 @@ its script changes.
 - The Linux router disables ICMP redirects and the endpoints ignore them, so traffic keeps
   traversing the router even though it forwards packets back out of the interface they
   arrived on.
-- Installing the Windows Routing role can request a restart. When it does, the router VM
-  reboots roughly two minutes after the deployment finishes.
+- The Windows router does not install the RemoteAccess or Routing (RRAS) roles. RRAS is only
+  needed for NAT, demand-dial, VPN, or dynamic routing protocols. Static forwarding between
+  subnets is performed by the TCP/IP stack itself, so the roles would add several minutes and
+  a reboot to the deployment without changing the datapath. `Set-NetIPInterface -Forwarding
+  Enabled` takes effect immediately; the `IPEnableRouter` registry value makes it survive a
+  restart.
 - With Accelerated Networking, forwarded flows are handled by the guest rather than offloaded
   to the NIC, so router throughput is bounded by the VM's CPU.
 - The Windows router VM does not get `iperf3` or `tcpdump`. Use `pktmon` or `netsh trace`

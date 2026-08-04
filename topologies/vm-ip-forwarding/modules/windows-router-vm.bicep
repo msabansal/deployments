@@ -33,11 +33,17 @@ var rawScript = '''
 $ErrorActionPreference = 'Stop'
 $portRange = '__PORT_START__-__PORT_END__'
 
-# Persistent global IPv4 forwarding.
+# Persistent global IPv4 forwarding. Set-NetIPInterface below is what actually enables
+# forwarding for this boot; this registry value keeps it enabled across a restart.
 Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' `
   -Name 'IPEnableRouter' -Value 1 -Type DWord
 
-# Per-interface forwarding, which takes effect without a restart.
+# Per-interface forwarding, which takes effect immediately and without a restart.
+#
+# The RemoteAccess and Routing roles are deliberately not installed. RRAS is only required
+# for NAT, demand-dial, VPN, or dynamic routing protocols. Static forwarding between subnets
+# is performed by the TCP/IP stack itself, so installing RRAS would add several minutes and
+# a reboot to the deployment without changing the datapath.
 #
 # Accelerated Networking exposes two "physical" adapters: the synthetic NetVSC NIC and the
 # Mellanox virtual function bound underneath it. The VF has no IPv4 stack of its own, so
@@ -60,20 +66,6 @@ foreach ($ipv4Interface in $ipv4Interfaces) {
   }
 }
 
-$installResult = $null
-
-try {
-  $installResult = Install-WindowsFeature -Name RemoteAccess, Routing -IncludeManagementTools
-  if (-not (Get-RemoteAccess -ErrorAction SilentlyContinue)) {
-    Install-RemoteAccess -VpnType RoutingOnly -Force
-  }
-  Set-Service -Name RemoteAccess -StartupType Automatic
-  Restart-Service -Name RemoteAccess -Force
-}
-catch {
-  Write-Output "RemoteAccess routing configuration deferred: $($_.Exception.Message)"
-}
-
 function Set-TopologyFirewallRule {
   param($Name, $Params)
   Remove-NetFirewallRule -DisplayName $Name -ErrorAction SilentlyContinue
@@ -83,11 +75,6 @@ function Set-TopologyFirewallRule {
 Set-TopologyFirewallRule -Name 'Topology test traffic (TCP)' -Params @{ Protocol = 'TCP'; LocalPort = $portRange }
 Set-TopologyFirewallRule -Name 'Topology test traffic (UDP)' -Params @{ Protocol = 'UDP'; LocalPort = $portRange }
 Set-TopologyFirewallRule -Name 'Topology ICMPv4 echo' -Params @{ Protocol = 'ICMPv4'; IcmpType = 8 }
-
-if ($installResult -and $installResult.RestartNeeded -eq 'Yes') {
-  Write-Output 'Restart required by RemoteAccess installation; restarting in 120 seconds.'
-  & shutdown.exe /r /t 120 /c 'Completing router role installation'
-}
 
 # Fail loudly rather than leaving a router that silently drops transit traffic.
 $router = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'IPEnableRouter').IPEnableRouter
