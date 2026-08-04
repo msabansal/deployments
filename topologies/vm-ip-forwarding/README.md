@@ -328,6 +328,15 @@ iteration. This works in both directions, so recreating on `Standard_DS2_v2` and
 `Standard_D2s_v6` each iteration keeps working. Both images this topology uses report `SCSI, NVMe`,
 so either controller boots.
 
+The size and controller change is sent as a REST `PATCH` rather than through `az vm update`.
+`az vm update` reads the whole VM and writes it back, and the VM it reads does not carry the OS
+disk storage account type, so the write-back silently clears it. Once that property is empty the
+platform will not let anything set it again through the VM, so the next deployment fails with
+`Managed disk storage account type change through Virtual Machine is not allowed` and the group
+stays stuck until the router is recreated. A `PATCH` carries only the size and the controller, so
+nothing else moves. `deploy.ps1` also notices a router that has already lost the property and omits
+it from the deployment, which lets a group in that state be redeployed instead of rebuilt.
+
 The single-resource-group loop takes the same pair of switches, where the size cycle replaces the
 redeploy for every iteration:
 

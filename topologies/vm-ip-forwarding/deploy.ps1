@@ -71,6 +71,23 @@ if ($LASTEXITCODE -ne 0) {
   throw "Resource group creation failed with exit code $LASTEXITCODE."
 }
 
+# A router that has already been resized no longer carries an OS disk storage account type, and the
+# platform refuses to let anything put that property back through the VM. Sending the type the
+# template would normally ask for therefore fails the whole deployment with "Managed disk storage
+# account type change through Virtual Machine is not allowed". Leave the property out in that case:
+# the disk keeps the type it already has, so nothing about the topology changes.
+$existingVmsJson = az vm list --resource-group $ResourceGroupName -o json 2>$null
+
+if ($LASTEXITCODE -eq 0 -and $existingVmsJson) {
+  $routerMissingDiskType = $existingVmsJson | ConvertFrom-Json |
+    Where-Object { $_.name -like '*router*' -and -not $_.storageProfile.osDisk.managedDisk.storageAccountType }
+
+  if ($routerMissingDiskType) {
+    Write-Host 'The router VM has no OS disk storage account type, so the deployment leaves that property alone.' -ForegroundColor Yellow
+    $deploymentParameters += 'routerOsDiskStorageAccountType='
+  }
+}
+
 az deployment group create `
   --resource-group $ResourceGroupName `
   --name 'vm-ip-forwarding' `

@@ -74,6 +74,12 @@ $currentController = az vm show --resource-group $ResourceGroupName --name $VmNa
   --query storageProfile.diskControllerType -o tsv 2>$null
 $currentController = if ($LASTEXITCODE -eq 0 -and $currentController) { $currentController.Trim() } else { 'SCSI' }
 
+$vmId = az vm show --resource-group $ResourceGroupName --name $VmName --query id -o tsv
+if ($LASTEXITCODE -ne 0 -or -not $vmId) {
+  throw "Could not read the resource id of '$VmName' in '$ResourceGroupName'."
+}
+$vmId = $vmId.Trim()
+
 $otherController = if ($currentController -eq 'NVMe') { 'SCSI' } else { 'NVMe' }
 
 if (-not $global:RouterSizeControllerCache) {
@@ -102,11 +108,63 @@ function Set-VmSizeAndController {
   param([string]$Controller)
 
   Write-Host "  $VmSize cannot boot from $currentController, so the disk controller moves to $Controller." -ForegroundColor Yellow
-  az vm update `
-    --resource-group $ResourceGroupName `
-    --name $VmName `
-    --set "hardwareProfile.vmSize=$VmSize" "storageProfile.diskControllerType=$Controller" `
-    --only-show-errors 2>&1 | Out-String
+
+  # This is deliberately a PATCH rather than "az vm update", which reads the whole VM and writes it
+  # back. The VM it reads does not carry the OS disk storage account type, so the write-back clears
+  # it, and once that field is empty the platform refuses to let anything set it again through the
+  # VM. A later redeploy sends the type the template asks for and fails with "Managed disk storage
+  # account type change through Virtual Machine is not allowed", which leaves the topology stuck
+  # until the VM is recreated. A PATCH only carries the two properties below, so nothing else moves.
+  $body = @{
+    properties = @{
+      hardwareProfile = @{ vmSize = $VmSize }
+      storageProfile  = @{ diskControllerType = $Controller }
+    }
+  } | ConvertTo-Json -Depth 5 -Compress
+
+  $bodyFile = [System.IO.Path]::GetTempFileName()
+
+  try {
+    [System.IO.File]::WriteAllText($bodyFile, $body)
+    $output = az rest --method patch `
+      --url "https://management.azure.com$($vmId)?api-version=2024-07-01" `
+      --body "@$bodyFile" `
+      --only-show-errors 2>&1 | Out-String
+  }
+  finally {
+    Remove-Item $bodyFile -Force -ErrorAction SilentlyContinue
+  }
+
+  if ($LASTEXITCODE -ne 0) {
+    return $output
+  }
+
+  # A PATCH returns as soon as the request is accepted, so wait for the VM to settle before the
+  # caller tries to start it.
+  $deadline = (Get-Date).AddMinutes(10)
+
+  while ((Get-Date) -lt $deadline) {
+    $state = az vm show --resource-group $ResourceGroupName --name $VmName --query provisioningState -o tsv 2>$null
+
+    if ($LASTEXITCODE -eq 0 -and $state) {
+      $state = $state.Trim()
+
+      if ($state -eq 'Succeeded') {
+        $global:LASTEXITCODE = 0
+        return $output
+      }
+
+      if ($state -eq 'Failed') {
+        $global:LASTEXITCODE = 1
+        return "$output`nThe VM reached provisioning state 'Failed' after the size and controller change."
+      }
+    }
+
+    Start-Sleep -Seconds 5
+  }
+
+  $global:LASTEXITCODE = 1
+  return "$output`nThe VM did not finish updating within 10 minutes."
 }
 
 if ($controllerChanges) {

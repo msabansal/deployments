@@ -45,6 +45,9 @@ param endpointVmSize string = 'Standard_D2s_v5'
 @description('Size of the router VM. Must support Accelerated Networking.')
 param routerVmSize string = 'Standard_D4s_v5'
 
+@description('Storage account type for the router OS disk. Set to an empty string to leave the property off the VM, which is required when redeploying over a router that has already been resized.')
+param routerOsDiskStorageAccountType string = 'Premium_LRS'
+
 @description('Enable Accelerated Networking on the endpoint VMs.')
 param enableEndpointAcceleratedNetworking bool = false
 
@@ -119,6 +122,7 @@ module linuxRouter 'modules/linux-vm.bicep' = if (!deployWindowsRouter) {
     adminUsername: adminUsername
     adminPublicKey: adminPublicKey
     vmSize: routerVmSize
+    osDiskStorageAccountType: routerOsDiskStorageAccountType
     enableAcceleratedNetworking: true
     enableIpForwarding: true
     privateIpAddress: routerPrivateIpAddress
@@ -137,6 +141,7 @@ module windowsRouter 'modules/windows-router-vm.bicep' = if (deployWindowsRouter
     adminUsername: adminUsername
     adminPassword: routerAdminPassword
     vmSize: routerVmSize
+    osDiskStorageAccountType: routerOsDiskStorageAccountType
     enableAcceleratedNetworking: true
     privateIpAddress: routerPrivateIpAddress
     testPortRangeStart: testPortRangeStart

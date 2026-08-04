@@ -17,6 +17,9 @@ param adminPassword string
 @description('Virtual machine size.')
 param vmSize string
 
+@description('Storage account type for the OS disk. An empty string leaves the property off the VM, which is what a redeploy over an already-resized VM needs.')
+param osDiskStorageAccountType string = 'Premium_LRS'
+
 @description('Enable Accelerated Networking on the network interface.')
 param enableAcceleratedNetworking bool
 
@@ -166,12 +169,13 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
         sku: '2022-datacenter-azure-edition'
         version: 'latest'
       }
-      osDisk: {
+      osDisk: union({
         createOption: 'FromImage'
+      }, empty(osDiskStorageAccountType) ? {} : {
         managedDisk: {
-          storageAccountType: 'Premium_LRS'
+          storageAccountType: osDiskStorageAccountType
         }
-      }
+      })
     }
     diagnosticsProfile: {
       bootDiagnostics: {
