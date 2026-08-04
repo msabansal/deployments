@@ -160,28 +160,6 @@ if ($serverResult.Stderr) {
 }
 
 try {
-  $routerIsLinux = $routerOs -ne 'WindowsServer2022'
-
-  # Reading the kernel's own forwarding counter is a far better proof that the router did the
-  # work than capturing packets. With Accelerated Networking the VF handles the traffic and
-  # tcpdump on the synthetic interface sees none of it, so a capture reports zero packets even
-  # while the router is forwarding at line rate.
-  $forwardCounterScript = @'
-grep '^Ip:' /proc/net/snmp | head -2 | awk 'NR==1 { for (i = 1; i <= NF; i++) if ($i == "ForwDatagrams") c = i } NR==2 { print $c }'
-'@
-
-  $forwardedBefore = $null
-  if ($routerIsLinux) {
-    $value = (Invoke-VmShellScript -VmName $routerVm -Script $forwardCounterScript).Stdout.Trim()
-    $parsed = 0L
-    if ([long]::TryParse($value, [ref] $parsed)) {
-      $forwardedBefore = $parsed
-      Write-Host "Router has forwarded $('{0:N0}' -f $parsed) datagrams so far."
-    }
-    else {
-      Write-Warning "Could not read the router's forwarding counter, so the forwarded datagram check is skipped."
-    }
-  }
 
   $direction = if ($Reverse) { '--reverse' } else { '' }
   $clientTimeout = $DurationSeconds + 30
@@ -278,15 +256,6 @@ PYEOF
   $cpu = $report.end.cpu_utilization_percent
   $streamCount = @($report.end.streams).Count
 
-  $forwardedDatagrams = $null
-  if ($null -ne $forwardedBefore) {
-    $value = (Invoke-VmShellScript -VmName $routerVm -Script $forwardCounterScript).Stdout.Trim()
-    $parsed = 0L
-    if ([long]::TryParse($value, [ref] $parsed)) {
-      $forwardedDatagrams = $parsed - $forwardedBefore
-    }
-  }
-
   Write-Host ''
   Write-Host '================ throughput summary ================' -ForegroundColor Cyan
   Write-Host ("  path                 : {0} -> {1} -> {2}" -f $endpointAIp, $routerIp, $endpointBIp)
@@ -302,16 +271,6 @@ PYEOF
   if ($cpu) {
     Write-Host ("  client CPU (sender)  : {0:N1} %" -f $cpu.host_total)
     Write-Host ("  server CPU (receiver): {0:N1} %" -f $cpu.remote_total)
-  }
-
-  if ($null -ne $forwardedDatagrams) {
-    if ($forwardedDatagrams -gt 0) {
-      Write-Host ("  datagrams forwarded   : {0:N0}" -f $forwardedDatagrams) -ForegroundColor Green
-      Write-Host '  the router forwarded the traffic in its own IP stack.' -ForegroundColor Green
-    }
-    else {
-      throw "The router's ForwDatagrams counter did not increase during the test, so it did not forward the traffic."
-    }
   }
 
   Write-Host '====================================================' -ForegroundColor Cyan

@@ -152,13 +152,13 @@ Do not try to prove this with `tcpdump` on the router. With Accelerated Networki
 function carries the traffic, and a capture on the synthetic interface, or on `any`, reports
 zero packets while the router is forwarding at line rate.
 
-### Continuous redeploy test
+### Single-instance loop
 
-`test-redeploy-loop.ps1` answers a different question: does forwarding still perform after the
-router lands on a different host? Each iteration runs the throughput test and compares it with
-a baseline. While the result stays at or above 80 percent of the baseline the router VM is
-redeployed onto a new host and the test runs again. The loop stops on the first iteration that
-falls short, which is the placement worth investigating.
+`test-redeploy-loop.ps1` owns everything that happens to one resource group. It can deploy the
+topology, resize the router to a different SKU before anything is measured, and then loop: run
+the throughput test, compare the result with a baseline, and change the router VM before going
+round again. While the result stays at or above 80 percent of the baseline it keeps going, and
+it stops on the first iteration that falls short, which is the placement worth investigating.
 
 ```powershell
 .\test-redeploy-loop.ps1 -ResourceGroupName <resource-group>
@@ -166,16 +166,26 @@ falls short, which is the placement worth investigating.
 
 | Switch | Purpose |
 | --- | --- |
+| `-Deploy` | Deploy the topology first. Requires `-Location`. Without it the resource group must already exist. |
+| `-RouterChange <mode>` | What happens to the router between iterations: `Redeploy` (default), `Recreate`, or `None`. |
+| `-IterationsBeforeChange <m>` | Successful iterations between router changes. Defaults to 1. |
 | `-BaselineGbps <n>` | Compare against a known figure instead of measuring one on the first iteration. |
 | `-ThresholdPercent <n>` | Acceptance threshold. Defaults to 80. |
 | `-MaxIterations <n>` | Stop after this many iterations. Defaults to 0, meaning run until a failure. |
-| `-RedeployTimeoutMinutes <n>` | How long to wait for the router VM after a redeploy. Defaults to 20. |
-| `-ResizedRouterVmSize <sku>` | Move the router to this SKU before every run. With `-InitialRouterVmSize` this replaces the redeploy with a full size cycle. |
-| `-InitialRouterVmSize <sku>` | The SKU the router is put back on at the start of each cycle. |
+| `-RouterTimeoutMinutes <n>` | How long to wait for the router VM after a redeploy or resize. Defaults to 20. |
+| `-InitialRouterVmSize <sku>` | The SKU router VMs are created on, by `-Deploy` and by a `Recreate`. |
+| `-ResizedRouterVmSize <sku>` | Resize the router to this SKU as soon as it is created, before anything is measured. |
 | `-ResultCsvPath <path>` | Write the per-iteration results to CSV. |
+| `-PassThru` | Return the result object instead of exiting. |
+
+The two router change modes answer different questions. `Redeploy` uses `az vm redeploy`, which
+moves the existing VM to a different host and keeps its disk, so it tests placement cheaply.
+`Recreate` deletes the VM and its OS disk and re-runs the deployment, which builds a new VM from
+the image and re-applies the guest configuration. The NIC is left in place in both cases, so the
+router keeps the static address the route tables point at.
 
 The script exits with code 1 when an iteration falls below the threshold, when the path check
-fails, or when a redeploy does not come back, so it can be dropped straight into a pipeline.
+fails, or when a router change does not come back, so it can be dropped straight into a pipeline.
 
 ```
 Iteration GbpsSent PercentOfBaseline Status     Detail
@@ -184,17 +194,23 @@ Iteration GbpsSent PercentOfBaseline Status     Detail
         2     6.58             94.50 acceptable first hop 10.30.0.4, 20216 retransmits
 ```
 
-A redeploy takes several minutes, so budget roughly `DurationSeconds + 5 minutes` per
-iteration. Forwarding survives a redeploy because it is persisted in the guest: `IPEnableRouter`
-on Windows and the sysctl drop-in on Linux.
+A redeploy takes several minutes and a rebuild longer still, so budget roughly
+`DurationSeconds + 5 minutes` per iteration. Forwarding survives both because it is persisted in
+the guest: `IPEnableRouter` on Windows and the sysctl drop-in on Linux.
 
 ### Fleet test across many deployments
 
-`test-fleet.ps1` scales the same idea out. It creates N resource groups named `<prefix>-01`,
-`<prefix>-02`, and so on, deploys the topology into each of them, and then runs the connectivity
-test in all of them at the same time. Every N successful iterations the router VM is deleted
-outright, along with its OS disk, and recreated by re-running the deployment. The whole run
-stops the moment any single instance fails.
+`test-fleet.ps1` scales the same idea out. It creates N resource group names from a prefix -
+`<prefix>-01`, `<prefix>-02`, and so on - and starts one `test-redeploy-loop.ps1` per resource
+group. All the deploy, resize, recreate and connectivity logic lives in that script; the fleet
+script only launches instances and monitors them. The whole run stops the moment any single
+instance fails.
+
+Instances do not wait for each other at any point. A slow deployment in one resource group does
+not hold up testing in another, and an instance that is mid-rebuild does not stop its neighbours
+from measuring. The only thing shared between them is an abort flag: the first worker to fail
+sets it and the others stop at their next stage boundary, so a failure is not masked by the rest
+of the fleet continuing to run.
 
 ```powershell
 .\test-fleet.ps1 -ResourceGroupPrefix sabansal-fwd -Location westus2 -InstanceCount 4
@@ -203,10 +219,11 @@ stops the moment any single instance fails.
 | Switch | Purpose |
 | --- | --- |
 | `-InstanceCount <n>` | How many independent copies of the topology to run. Defaults to 3. |
-| `-IterationsBeforeRecreate <m>` | Successful iterations between router VM rebuilds. Defaults to 3. |
+| `-RouterChange <mode>` | What happens to each router between iterations: `Recreate` (default here), `Redeploy`, or `None`. |
+| `-IterationsBeforeChange <m>` | Successful iterations between router VM changes. Defaults to 3. |
 | `-InitialRouterVmSize <sku>` | Create the routers on this SKU, on the initial deploy and on every rebuild. |
 | `-ResizedRouterVmSize <sku>` | Resize a router to this SKU as soon as it is created, before anything is measured. |
-| `-ResizeTimeoutMinutes <n>` | How long to wait for a router after the resize. Defaults to 20. |
+| `-RouterTimeoutMinutes <n>` | How long to wait for a router after a resize or rebuild. Defaults to 20. |
 | `-MaxIterations <n>` | Stop after this many iterations. Defaults to 0, meaning run until a failure. |
 | `-ThresholdPercent <n>` | Acceptance threshold against each instance's own baseline. Defaults to 80. |
 | `-BaselineGbps <n>` | Use one fixed baseline for every instance instead of measuring one per instance. |
@@ -217,18 +234,24 @@ stops the moment any single instance fails.
 
 Each instance measures its own baseline on its first iteration, because throughput depends on
 the hosts a given deployment happened to land on. Comparing every instance against a single
-shared number would produce false failures.
+shared number would produce false failures. Instances also run their iterations independently,
+so they drift out of step with each other: one may be on iteration 5 while another is still
+rebuilding its router after iteration 3.
+
+Because workers run concurrently, the console shows one short milestone line per instance,
+prefixed with the resource group, and these interleave:
 
 ```
-  sabansal-fwd-01      7.02 Gbits/sec   100.0% of baseline
-  sabansal-fwd-02      6.71 Gbits/sec    95.6% of baseline
-  sabansal-fwd-03  FAILED  4.10 Gbits/sec is 58.4% of the 7.02 Gbits/sec baseline
+[sabansal-fwd-01] deployed in 207 seconds
+[sabansal-fwd-02] deploying...
+[sabansal-fwd-01] resizing the router to Standard_D2s_v5...
+[sabansal-fwd-01] iteration 1 baseline 11.13 Gbits/sec, first hop 10.30.0.4
+[sabansal-fwd-03] FAILED - 4.10 Gbits/sec on iteration 2 is 58.4% of the 7.02 Gbits/sec baseline
 ```
 
-Instances run in parallel runspaces, so their console output would otherwise interleave. Each
-instance writes its full output to `<LogDirectory>\<resource-group>-<phase>.log`, and the run
-writes a `summary.csv` with the per-instance outcome. The script exits with code 1 when any
-instance fails.
+Each instance writes its full output, including everything the deployment and the connectivity
+test printed, to `<LogDirectory>\<resource-group>.log`, and the run writes a `summary.csv` with
+the per-instance outcome. The script exits with code 1 when any instance fails.
 
 Note the difference between the two loops. `test-redeploy-loop.ps1` uses `az vm redeploy`, which
 moves the existing VM to a different host and keeps its disk. `test-fleet.ps1` deletes the VM and
