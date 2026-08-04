@@ -72,6 +72,12 @@ param(
   [ValidateRange(0, 100000)]
   [double] $MinimumMbps = 100,
 
+  # How often to print a progress summary and flush the results to disk. A long run would
+  # otherwise show nothing between the per-iteration lines and the final summary, and would lose
+  # every result if it were interrupted.
+  [ValidateRange(0, 10000)]
+  [int] $SummaryEveryIterations = 10,
+
   # 0 means keep going until an iteration fails.
   [ValidateRange(0, 10000)]
   [int] $MaxIterations = 0,
@@ -194,6 +200,68 @@ function Invoke-SubScript {
 function Test-ShouldStop {
   if (-not $AbortSignal) { return $false }
   return [bool]$AbortSignal['abort']
+}
+
+# Both the periodic and the final summary print the same table, so they share one writer. Each row
+# is prefixed individually because the fleet interleaves the output of concurrent instances and an
+# unprefixed block of rows cannot be attributed to one.
+function Write-ResultsTable {
+  param([Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Rows)
+
+  if (-not $Rows -or $Rows.Count -eq 0) {
+    Write-Line '  no iterations recorded yet'
+    return
+  }
+
+  ($Rows | Format-Table -AutoSize | Out-String -Width 200).TrimEnd() -split "`r?`n" |
+    ForEach-Object { Write-Line $_ }
+}
+
+# Rewrites the CSV with everything recorded so far. A long run that is interrupted, by a failure
+# elsewhere in the fleet or by the operator, then still leaves its results behind.
+function Save-Results {
+  param([Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Rows)
+
+  if (-not $ResultCsvPath -or -not $Rows -or $Rows.Count -eq 0) { return }
+
+  try {
+    $Rows | Export-Csv -LiteralPath $ResultCsvPath -NoTypeInformation
+  }
+  catch {
+    # Losing a progress flush is not worth ending the run over; the final write will try again.
+    Write-Line "could not write $ResultCsvPath : $($_.Exception.Message)" 'Yellow'
+  }
+}
+
+function Write-ProgressSummary {
+  param(
+    [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Rows,
+    [Parameter(Mandatory)] [int] $Iteration
+  )
+
+  $measured = @($Rows | Where-Object { $null -ne $_.GbpsSent -and $_.GbpsSent -gt 0 })
+
+  Write-Line ''
+  Write-Line "---------- progress after $Iteration iterations ----------" 'Cyan'
+  Write-Line ("  resource group : {0}" -f $ResourceGroupName)
+  Write-Line ("  router VM      : {0} ({1})" -f $routerVmName, $routerVmSize)
+  Write-Line ("  baseline       : {0:N2} Gbits/sec" -f $BaselineGbps)
+  Write-Line ("  router changes : {0}" -f $routerChanges)
+
+  if ($measured.Count -gt 0) {
+    $stats = $measured | Measure-Object -Property GbpsSent -Average -Minimum -Maximum
+    Write-Line ("  throughput     : {0:N2} avg, {1:N2} min, {2:N2} max Gbits/sec over {3} measured iterations" -f `
+        $stats.Average, $stats.Minimum, $stats.Maximum, $measured.Count)
+  }
+
+  Write-Line ''
+  Write-ResultsTable -Rows $Rows
+  Save-Results -Rows $Rows
+
+  if ($ResultCsvPath) { Write-Line "  flushed to $ResultCsvPath" }
+
+  Write-Line '----------------------------------------------------------' 'Cyan'
+  Write-Line ''
 }
 
 function Get-RouterVmName {
@@ -503,7 +571,15 @@ try {
 
     Write-Line ("iteration {0} is acceptable: {1:N2} Gbits/sec, {2:N1}% of the baseline." -f $iteration, $result.GbpsSent, $percent) 'Green'
 
-    if ($MaxIterations -gt 0 -and $iteration -ge $MaxIterations) {
+    # Print and flush on the interval. The final summary covers the last iteration, so it is
+    # skipped here to avoid printing the same table twice in a row.
+    $isLastIteration = $MaxIterations -gt 0 -and $iteration -ge $MaxIterations
+
+    if ($SummaryEveryIterations -gt 0 -and -not $isLastIteration -and ($iteration % $SummaryEveryIterations) -eq 0) {
+      Write-ProgressSummary -Rows $results.ToArray() -Iteration $iteration
+    }
+
+    if ($isLastIteration) {
       Write-Line "Reached the requested iteration count of $MaxIterations." 'Cyan'
       break
     }
@@ -565,13 +641,10 @@ Write-Line ("  iterations     : {0}" -f $results.Count)
 Write-Line ("  router changes : {0}" -f $routerChanges)
 Write-Line ''
 
-# Prefix every row individually. The fleet runs instances concurrently and their output
-# interleaves, so an unprefixed block of table rows cannot be attributed to an instance.
-($results | Format-Table -AutoSize | Out-String -Width 200).TrimEnd() -split "`r?`n" |
-  ForEach-Object { Write-Line $_ }
+Write-ResultsTable -Rows $results.ToArray()
 
 if ($ResultCsvPath) {
-  $results | Export-Csv -LiteralPath $ResultCsvPath -NoTypeInformation
+  Save-Results -Rows $results.ToArray()
   Write-Line "Results written to $ResultCsvPath"
 }
 

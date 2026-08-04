@@ -164,6 +164,12 @@ There is also an absolute floor, 100 Mbits/sec by default, checked before the ba
 percentage threshold alone cannot catch a run that was already broken on its first iteration,
 because that first measurement becomes the baseline and everything after it compares favourably.
 
+A run left going indefinitely would otherwise print nothing between the per-iteration lines and
+the summary it reaches only when it stops. Every ten iterations it prints a progress summary -
+the average, minimum and maximum throughput so far, the router change count and the table of
+results - and rewrites `-ResultCsvPath`, so the results of a long run survive an interruption.
+The fleet gives each instance a CSV next to its log automatically.
+
 ```powershell
 .\test-redeploy-loop.ps1 -ResourceGroupName <resource-group>
 ```
@@ -181,6 +187,7 @@ because that first measurement becomes the baseline and everything after it comp
 | `-InitialRouterVmSize <sku>` | The SKU router VMs are created on, by `-Deploy` and by a `Recreate`. |
 | `-ResizedRouterVmSize <sku>` | Resize the router to this SKU as soon as it is created, before anything is measured. |
 | `-ResultCsvPath <path>` | Write the per-iteration results to CSV. |
+| `-SummaryEveryIterations <n>` | Print a progress summary and flush the CSV every n iterations. Defaults to 10. Set to 0 to only summarise at the end. |
 | `-PassThru` | Return the result object instead of exiting. |
 
 The two router change modes answer different questions. `Redeploy` uses `az vm redeploy`, which
@@ -232,6 +239,7 @@ of the fleet continuing to run.
 | `-MaxIterations <n>` | Stop after this many iterations. Defaults to 0, meaning run until a failure. |
 | `-ThresholdPercent <n>` | Acceptance threshold against each instance's own baseline. Defaults to 80. |
 | `-MinimumMbps <n>` | Absolute throughput floor in Mbits/sec applied to every instance. Defaults to 100. Set to 0 to disable. |
+| `-SummaryEveryIterations <n>` | How often each instance prints a progress summary and flushes its results. Defaults to 10. |
 | `-BaselineGbps <n>` | Use one fixed baseline for every instance instead of measuring one per instance. |
 | `-SkipDeploy` | Reuse resource groups that are already deployed. |
 | `-MaxParallel <n>` | Limit how many instances are worked on at once. Defaults to all of them. |

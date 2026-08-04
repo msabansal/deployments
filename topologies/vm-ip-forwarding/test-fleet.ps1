@@ -84,6 +84,10 @@ param(
   [ValidateRange(0, 100000)]
   [double] $MinimumMbps = 100,
 
+  # How often each instance prints a progress summary and flushes its results to disk.
+  [ValidateRange(0, 10000)]
+  [int] $SummaryEveryIterations = 10,
+
   # Apply the same baseline to every instance instead of measuring one per instance.
   [ValidateRange(0, 1000)]
   [double] $BaselineGbps = 0,
@@ -169,6 +173,7 @@ $context = @{
   DurationSeconds        = $DurationSeconds
   ThresholdPercent       = $ThresholdPercent
   MinimumMbps            = $MinimumMbps
+  SummaryEveryIterations = $SummaryEveryIterations
   BaselineGbps           = $BaselineGbps
   Deploy                 = -not $SkipDeploy
   Shared                 = $shared
@@ -239,8 +244,12 @@ $resourceGroups | ForEach-Object -ThrottleLimit $MaxParallel -Parallel {
     DurationSeconds        = $context.DurationSeconds
     ThresholdPercent       = $context.ThresholdPercent
     MinimumMbps            = $context.MinimumMbps
+    SummaryEveryIterations = $context.SummaryEveryIterations
     BaselineGbps           = $context.BaselineGbps
     LogPrefix              = $rg
+    # Give each instance its own CSV next to its log, so the periodic flush has somewhere to write
+    # and a long fleet run leaves per-iteration results behind even if it is interrupted.
+    ResultCsvPath          = (Join-Path $context.LogDirectory "$rg.csv")
     AbortSignal            = $context.Shared
     PassThru               = $true
   }
