@@ -65,78 +65,26 @@ if ($currentSize -eq $VmSize) {
   return
 }
 
-# Families differ in which disk controllers they can boot from: the v6 sizes are NVMe only, while
-# Dv2 and Dv5 are SCSI only. Moving between them without also switching the controller fails with
-# "cannot boot with DiskControllerType", so work out what the target size actually accepts.
-$location = az vm show --resource-group $ResourceGroupName --name $VmName --query location -o tsv
-if ($LASTEXITCODE -ne 0 -or -not $location) {
-  throw "Could not read the location of '$VmName' in '$ResourceGroupName'."
-}
-$location = $location.Trim()
-
-$skuCacheKey = "$location/$VmSize"
-if (-not $global:RouterSkuControllerCache) {
-  $global:RouterSkuControllerCache = @{}
-}
-
-# Listing SKUs downloads the whole catalogue for the region and takes a minute or more, so hold on
-# to the answer: the redeploy loop resizes to the same size on every iteration.
-if ($global:RouterSkuControllerCache.ContainsKey($skuCacheKey)) {
-  $supportedControllers = $global:RouterSkuControllerCache[$skuCacheKey]
-}
-else {
-  $skuJson = az vm list-skus --location $location --resource-type virtualMachines --size $VmSize -o json 2>$null
-  $targetSku = $null
-  if ($LASTEXITCODE -eq 0 -and $skuJson) {
-    $targetSku = $skuJson | ConvertFrom-Json | Where-Object { $_.name -eq $VmSize }
-  }
-
-  if (-not $targetSku) {
-    throw "Size '$VmSize' is not available in '$location'."
-  }
-
-  # The capability is absent on families that only ever supported SCSI, which is the same as
-  # advertising SCSI on its own.
-  $controllerCapability = ($targetSku.capabilities | Where-Object { $_.name -eq 'DiskControllerTypes' }).value
-  $supportedControllers = if ($controllerCapability) { $controllerCapability -split '\s*,\s*' } else { @('SCSI') }
-  $global:RouterSkuControllerCache[$skuCacheKey] = $supportedControllers
-}
-
+# The v6 sizes boot from NVMe only while Dv2 and Dv5 boot from SCSI only, so a resize between them
+# has to move the disk controller as well. Asking az which controllers a size accepts means listing
+# the whole SKU catalogue for the region, which takes a minute or more, so instead let the first
+# resize attempt fail and read the answer out of the error. There are only two controllers, so the
+# fix is always to flip to the other one.
 $currentController = az vm show --resource-group $ResourceGroupName --name $VmName `
   --query storageProfile.diskControllerType -o tsv 2>$null
 $currentController = if ($LASTEXITCODE -eq 0 -and $currentController) { $currentController.Trim() } else { 'SCSI' }
 
-# Keep the current controller when the target can boot from it, so a resize within a family stays
-# a plain resize. Otherwise prefer NVMe, which is the only option the newer families offer.
-$targetController = if ($supportedControllers -contains $currentController) { $currentController }
-elseif ($supportedControllers -contains 'NVMe') { 'NVMe' }
-else { $supportedControllers[0] }
+$otherController = if ($currentController -eq 'NVMe') { 'SCSI' } else { 'NVMe' }
 
-$controllerChanges = $targetController -ne $currentController
-
-if ($controllerChanges) {
-  Write-Host "  $VmSize cannot boot from $currentController, so the disk controller moves to $targetController." -ForegroundColor Yellow
-
-  # The guest needs drivers for the new controller or it will boot to a stop. Every image this
-  # topology uses advertises both, but a check here turns an unbootable VM into a clear error.
-  $imageJson = az vm show --resource-group $ResourceGroupName --name $VmName --query storageProfile.imageReference -o json 2>$null
-  if ($LASTEXITCODE -eq 0 -and $imageJson) {
-    $image = $imageJson | ConvertFrom-Json
-
-    if ($image.publisher -and $image.offer -and $image.sku) {
-      $urn = '{0}:{1}:{2}:{3}' -f $image.publisher, $image.offer, $image.sku, $(if ($image.exactVersion) { $image.exactVersion } else { 'latest' })
-      $imageDetailJson = az vm image show --location $location --urn $urn -o json 2>$null
-
-      if ($LASTEXITCODE -eq 0 -and $imageDetailJson) {
-        $imageControllers = (($imageDetailJson | ConvertFrom-Json).features | Where-Object { $_.name -eq 'DiskControllerTypes' }).value
-
-        if ($imageControllers -and ($imageControllers -split '\s*,\s*') -notcontains $targetController) {
-          throw "The image behind '$VmName' supports $imageControllers, so it cannot boot '$VmSize', which needs $targetController."
-        }
-      }
-    }
-  }
+if (-not $global:RouterSizeControllerCache) {
+  $global:RouterSizeControllerCache = @{}
 }
+
+# Once a size is known to need a controller the loop pays the failed attempt only that one time:
+# every later iteration resizing to the same size goes straight to the combined update.
+$knownController = $global:RouterSizeControllerCache[$VmSize]
+$controllerChanges = $knownController -and $knownController -ne $currentController
+$targetController = if ($controllerChanges) { $knownController } else { $currentController }
 
 Write-Host "Resizing router VM '$VmName' from $currentSize to $VmSize..." -ForegroundColor Yellow
 
@@ -147,18 +95,32 @@ if ($LASTEXITCODE -ne 0) {
   throw "Deallocating '$VmName' failed with exit code $LASTEXITCODE."
 }
 
-if ($controllerChanges) {
-  # Both have to move in one request. The controller cannot be changed on its own while the VM
-  # still holds a size that does not support it, and the size cannot be changed on its own while
-  # the disk is still attached to a controller the new size cannot boot from.
+# Size and controller have to move in one request. The controller cannot be changed on its own
+# while the VM still holds a size that does not support it, and the size cannot be changed on its
+# own while the disk is still attached to a controller the new size cannot boot from.
+function Set-VmSizeAndController {
+  param([string]$Controller)
+
+  Write-Host "  $VmSize cannot boot from $currentController, so the disk controller moves to $Controller." -ForegroundColor Yellow
   az vm update `
     --resource-group $ResourceGroupName `
     --name $VmName `
-    --set "hardwareProfile.vmSize=$VmSize" "storageProfile.diskControllerType=$targetController" `
-    --only-show-errors | Out-Null
+    --set "hardwareProfile.vmSize=$VmSize" "storageProfile.diskControllerType=$Controller" `
+    --only-show-errors 2>&1 | Out-String
+}
+
+if ($controllerChanges) {
+  $resizeOutput = Set-VmSizeAndController -Controller $targetController
 }
 else {
-  az vm resize --resource-group $ResourceGroupName --name $VmName --size $VmSize --only-show-errors | Out-Null
+  $resizeOutput = az vm resize --resource-group $ResourceGroupName --name $VmName --size $VmSize --only-show-errors 2>&1 | Out-String
+
+  if ($LASTEXITCODE -ne 0 -and $resizeOutput -match 'DiskControllerType') {
+    $targetController = $otherController
+    $controllerChanges = $true
+    $global:RouterSizeControllerCache[$VmSize] = $targetController
+    $resizeOutput = Set-VmSizeAndController -Controller $targetController
+  }
 }
 
 if ($LASTEXITCODE -ne 0) {
@@ -166,7 +128,7 @@ if ($LASTEXITCODE -ne 0) {
   # so bring it back at its original size before reporting the problem.
   Write-Warning "Resize to $VmSize failed. Starting '$VmName' again at $currentSize."
   az vm start --resource-group $ResourceGroupName --name $VmName --only-show-errors | Out-Null
-  throw "Resizing '$VmName' to $VmSize failed with exit code $LASTEXITCODE."
+  throw "Resizing '$VmName' to $VmSize failed with exit code $LASTEXITCODE.`n$($resizeOutput.Trim())"
 }
 
 az vm start --resource-group $ResourceGroupName --name $VmName --only-show-errors | Out-Null

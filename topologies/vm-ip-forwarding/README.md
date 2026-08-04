@@ -319,13 +319,14 @@ runs is a no-op, so the resize phase is safe to repeat and safe to use with `-Sk
 
 The disk controller is handled along the way. The v6 families boot from NVMe only, while Dv2 and
 Dv5 boot from SCSI only, so a resize between them fails with `cannot boot with DiskControllerType`
-unless the controller moves at the same time. `resize-router.ps1` reads the controllers the target
-size accepts, compares them with the one the VM currently uses, and when they do not overlap it
-changes the size and the controller in a single `az vm update` rather than calling `az vm resize`.
-This works in both directions, so a loop that recreates on `Standard_DS2_v2` and resizes up to
-`Standard_D2s_v6` on every iteration keeps working. Both images this topology uses advertise SCSI
-and NVMe; the script checks the image before switching and fails with a clear message if a custom
-image does not support the controller the target size needs.
+unless the controller moves at the same time. Asking Azure which controllers a size accepts means
+listing the whole SKU catalogue for the region, which takes a minute or more, so `resize-router.ps1`
+instead lets the first `az vm resize` fail, recognises that error, and retries with a single
+`az vm update` that changes the size and flips the controller together. The answer is remembered
+per size for the rest of the process, so a loop pays the failed attempt once rather than on every
+iteration. This works in both directions, so recreating on `Standard_DS2_v2` and resizing up to
+`Standard_D2s_v6` each iteration keeps working. Both images this topology uses report `SCSI, NVMe`,
+so either controller boots.
 
 The single-resource-group loop takes the same pair of switches, where the size cycle replaces the
 redeploy for every iteration:
