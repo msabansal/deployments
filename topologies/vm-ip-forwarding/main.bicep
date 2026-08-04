@@ -40,10 +40,10 @@ param adminPublicKey string
 param routerAdminPassword string = ''
 
 @description('Size of the two endpoint VMs.')
-param endpointVmSize string = 'Standard_D2s_v5'
+param endpointVmSize string = 'Standard_D2s_v6'
 
-@description('Size of the router VM. Must support Accelerated Networking.')
-param routerVmSize string = 'Standard_D4s_v5'
+@description('Size of the router VM. Must support Accelerated Networking and the NVMe disk controller, so it has to be a v6 size or newer.')
+param routerVmSize string = 'Standard_D4s_v6'
 
 @description('Storage account type for the router OS disk. Set to an empty string to leave the property off the VM, which is required when redeploying over a router that has already been resized.')
 param routerOsDiskStorageAccountType string = 'Premium_LRS'

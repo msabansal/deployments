@@ -20,6 +20,9 @@ param vmSize string
 @description('Storage account type for the OS disk. An empty string leaves the property off the VM, which is what a redeploy over an already-resized VM needs.')
 param osDiskStorageAccountType string = 'Premium_LRS'
 
+@description('Disk controller the VM boots from. NVMe keeps every size this topology uses on the same controller, so a resize never has to change it.')
+param diskControllerType string = 'NVMe'
+
 @description('Enable Accelerated Networking on the network interface.')
 param enableAcceleratedNetworking bool
 
@@ -292,6 +295,7 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
       }
     }
     storageProfile: {
+      diskControllerType: diskControllerType
       imageReference: {
         publisher: 'MicrosoftAzureLinux'
         offer: 'azurelinux-4'

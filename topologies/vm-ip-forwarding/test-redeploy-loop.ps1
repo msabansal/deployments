@@ -37,7 +37,7 @@
 .EXAMPLE
   .\test-redeploy-loop.ps1 -ResourceGroupName sabansal-fwd-01 -Location westus2 -Deploy `
     -RouterChange Recreate -IterationsBeforeChange 3 `
-    -InitialRouterVmSize Standard_DS2_v2 -ResizedRouterVmSize Standard_D2s_v5
+    -InitialRouterVmSize Standard_D2s_v6 -ResizedRouterVmSize Standard_D4s_v6
 #>
 [CmdletBinding()]
 param(

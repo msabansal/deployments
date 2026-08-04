@@ -13,8 +13,8 @@ param routerOs = 'AzureLinux'
 
 param adminUsername = 'azureuser'
 
-param endpointVmSize = 'Standard_D2s_v5'
-param routerVmSize = 'Standard_D2s_v5'
+param endpointVmSize = 'Standard_D2s_v6'
+param routerVmSize = 'Standard_D2s_v6'
 param enableEndpointAcceleratedNetworking = false
 
 param testPortRangeStart = 5000

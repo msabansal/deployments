@@ -82,11 +82,11 @@ hardware generation, and add `-ResizedRouterVmSize <sku>` to move it to another 
 deployment finishes:
 
 ```powershell
-.\deploy.ps1 -ResourceGroupName <resource-group> -Location <location> -RouterVmSize Standard_DS2_v2
+.\deploy.ps1 -ResourceGroupName <resource-group> -Location <location> -RouterVmSize Standard_D2s_v6
 ```
 
-The size must support Accelerated Networking. Note that `Standard_D2s_v2` does not exist: the
-two-vCPU premium-storage Dv2 SKU is `Standard_DS2_v2`.
+The size must support Accelerated Networking and must boot from NVMe, which means a v6 size or
+newer. See the resize section for why the whole topology is pinned to one disk controller.
 
 The deployment outputs the private and public IP of every VM along with the configured test
 port range.
@@ -275,7 +275,7 @@ prefixed with the resource group, and these interleave:
 ```
 [sabansal-fwd-01] deployed in 207 seconds
 [sabansal-fwd-02] deploying...
-[sabansal-fwd-01] resizing the router to Standard_D2s_v5...
+[sabansal-fwd-01] resizing the router to Standard_D4s_v6...
 [sabansal-fwd-01] iteration 1 baseline 11.13 Gbits/sec, first hop 10.30.0.4
 [sabansal-fwd-03] FAILED - 4.10 Gbits/sec on iteration 2 is 58.4% of the 7.02 Gbits/sec baseline
 ```
@@ -297,7 +297,7 @@ have them resized to another before anything is measured:
 
 ```powershell
 .\test-fleet.ps1 -ResourceGroupPrefix sabansal-fwd -Location westus2 -InstanceCount 2 `
-  -InitialRouterVmSize Standard_DS2_v2 -ResizedRouterVmSize Standard_D2s_v5
+  -InitialRouterVmSize Standard_D2s_v6 -ResizedRouterVmSize Standard_D4s_v6
 ```
 
 Every time a router VM comes into existence it is created on `-InitialRouterVmSize` and
@@ -307,55 +307,44 @@ of jumping straight to the target size. Every measurement is therefore taken on 
 and the baselines stay comparable across rebuilds.
 
 Both sizes are validated against the region before anything is deployed, so a typo fails in
-seconds rather than after N deployments. `Standard_D2s_v2` is a common one: it does not exist,
-and the size intended is almost always `Standard_DS2_v2`.
+seconds rather than after N deployments.
 
-A resize is not done in place. The Dv2 family runs on Haswell and Broadwell hosts and the Dv5
-family runs on Ice Lake hosts, so the target size is not offered by the cluster the VM currently
-sits on. `resize-router.ps1` therefore deallocates the VM, resizes it, and starts it again, which
-also lands it on a new host. Forwarding survives because it is persisted on the OS disk and
+A resize is not done in place. A target size is generally not offered by the cluster the VM
+currently sits on, so `resize-router.ps1` deallocates the VM, resizes it, and starts it again,
+which also lands it on a new host. Forwarding survives because it is persisted on the OS disk and
 re-applied at boot, and the NIC keeps the static address. Resizing to the size the VM already
 runs is a no-op, so the resize phase is safe to repeat and safe to use with `-SkipDeploy`.
 
-The disk controller is handled along the way. The v6 families boot from NVMe only, while Dv2 and
-Dv5 boot from SCSI only, so a resize between them fails with `cannot boot with DiskControllerType`
-unless the controller moves at the same time. Asking Azure which controllers a size accepts means
-listing the whole SKU catalogue for the region, which takes a minute or more, so `resize-router.ps1`
-instead lets the first `az vm resize` fail, recognises that error, and retries with a single
-`az vm update` that changes the size and flips the controller together. The answer is remembered
-per size for the rest of the process, so a loop pays the failed attempt once rather than on every
-iteration. This works in both directions, so recreating on `Standard_DS2_v2` and resizing up to
-`Standard_D2s_v6` each iteration keeps working. Both images this topology uses report `SCSI, NVMe`,
-so either controller boots.
+Every VM in this topology boots from the NVMe disk controller, set on the OS disk at deployment
+time. That is the reason all the sizes used here are v6 or newer: v6 and v7 sizes boot from NVMe
+only, while Dv2, Dv4 and Dv5 boot from SCSI only. Pinning one controller keeps a resize to a plain
+size change, because the controller never has to move with it. Mixing families does not work: a
+resize from a Dv4 or Dv5 size to a v6 or v7 size fails with `cannot boot with DiskControllerType`,
+and forcing the controller across at the same time leaves a VM that will not start. Both images
+this topology uses report `SCSI, NVMe`, so NVMe boots on Linux and on Windows. If a size that
+cannot boot from NVMe is passed, the resize says so and restarts the VM at its original size.
 
-The size and controller change is sent as a REST `PATCH` rather than through `az vm update`.
-`az vm update` reads the whole VM and writes it back, and the VM it reads does not carry the OS
-disk storage account type, so the write-back silently clears it. Once that property is empty the
-platform will not let anything set it again through the VM, so the next deployment fails with
-`Managed disk storage account type change through Virtual Machine is not allowed` and the group
-stays stuck until the router is recreated. A `PATCH` carries only the size and the controller, so
-nothing else moves. `deploy.ps1` also notices a router that has already lost the property and omits
-it from the deployment, which lets a group in that state be redeployed instead of rebuilt.
+The VMs carry no data disks; each has only its OS disk.
 
 The single-resource-group loop takes the same pair of switches, where the size cycle replaces the
 redeploy for every iteration:
 
 ```powershell
 .\test-redeploy-loop.ps1 -ResourceGroupName <resource-group> `
-  -InitialRouterVmSize Standard_DS2_v2 -ResizedRouterVmSize Standard_D2s_v5
+  -InitialRouterVmSize Standard_D2s_v6 -ResizedRouterVmSize Standard_D4s_v6
 ```
 
 `deploy.ps1` takes them too, so a one-off deployment can go through the same cycle:
 
 ```powershell
 .\deploy.ps1 -ResourceGroupName <resource-group> -Location <location> `
-  -RouterVmSize Standard_DS2_v2 -ResizedRouterVmSize Standard_D2s_v5 -RunConnectivityTest
+  -RouterVmSize Standard_D2s_v6 -ResizedRouterVmSize Standard_D4s_v6 -RunConnectivityTest
 ```
 
 `resize-router.ps1` can also be used on its own against a deployed topology:
 
 ```powershell
-.\resize-router.ps1 -ResourceGroupName <resource-group> -VmSize Standard_D2s_v5
+.\resize-router.ps1 -ResourceGroupName <resource-group> -VmSize Standard_D4s_v6
 ```
 
 ### Manual checks
@@ -448,7 +437,7 @@ its script changes.
 - `routerPrivateIpAddress` is statically assigned so that the route tables can be created
   before the router VM exists. Change it together with `routerSubnetPrefix`, and keep it
   outside the first four addresses of the subnet, which Azure reserves.
-- `routerVmSize` must support Accelerated Networking. The default `Standard_D4s_v5` does.
+- `routerVmSize` must support Accelerated Networking and must boot from NVMe, so it has to be a v6 size or newer. The default `Standard_D4s_v6` does both.
 - The Linux router disables ICMP redirects and the endpoints ignore them, so traffic keeps
   traversing the router even though it forwards packets back out of the interface they
   arrived on.
