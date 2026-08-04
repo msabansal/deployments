@@ -55,6 +55,7 @@ by the operating system.
 - `modules/windows-router-vm.bicep` - Windows Server 2022 router VM
 - `deploy.ps1` - deployment wrapper that reads the SSH key from `~\.ssh\id_ed25519.pub`
 - `test-connectivity.ps1` - iperf3 throughput test between the endpoints, through the router
+- `test-redeploy-loop.ps1` - repeatedly redeploys the router VM and re-runs the throughput test
 - `diagnose.ps1` - inspects, and optionally repairs, forwarding state on a deployed router VM
 
 ## Deploy
@@ -81,10 +82,11 @@ port range.
 
 ### Automated throughput test
 
-`test-connectivity.ps1` runs the whole verification end to end: it confirms the first hop
-from endpoint A is the router, starts an iperf3 server on endpoint B, drives a parallel-stream
-test for 60 seconds, captures packets on the router while the test runs, and prints a
-throughput summary.
+`test-connectivity.ps1` runs the whole verification end to end: it starts an iperf3 server on
+endpoint B, then runs a single script on endpoint A that first checks the next hop towards
+endpoint B and only then drives a parallel-stream test. The path check and the transfer are
+deliberately in the same script, so if the traffic is not going through the router the test
+fails instead of reporting a throughput number for a path that bypassed it.
 
 ```powershell
 .\test-connectivity.ps1 -ResourceGroupName <resource-group>
@@ -104,30 +106,67 @@ Useful switches:
 | `-DurationSeconds <n>` | Test length. Defaults to 60. |
 | `-Reverse` | Measure server-to-client instead of client-to-server. |
 | `-Port <n>` | iperf3 port. Defaults to 5201, which is inside the open `5000-6000` range. |
-| `-SkipPathCheck` | Skip the traceroute first-hop check. |
+| `-SkipPathCheck` | Do not fail when the next hop is not the router. |
+| `-PassThru` | Return the result as an object as well as printing the summary. |
 
 Sample output:
 
 ```
 ================ throughput summary ================
   path                 : 10.30.1.4 -> 10.30.0.4 -> 10.30.2.4
+  first hop verified   : 10.30.0.4
   direction            : client to server
   parallel streams     : 8
   duration             : 60.0 seconds
-  bytes sent           : 65.19 GB
-  throughput sent      : 9.40 Gbits/sec
-  throughput received  : 9.39 Gbits/sec
-  TCP retransmits      : 12
-  client CPU (sender)  : 45.2 %
-  server CPU (receiver): 38.1 %
+  bytes sent           : 51.89 GB
+  throughput sent      : 7.43 Gbits/sec
+  throughput received  : 7.43 Gbits/sec
+  TCP retransmits      : 82,185
+  client CPU (sender)  : 19.5 %
+  server CPU (receiver): 63.0 %
   packets seen on router: 4,812,904
   traffic confirmed to traverse the router.
 ====================================================
 ```
 
-The packet count is the important line: it proves the traffic really transited the router
-rather than taking a direct intra-VNet path. The router capture is only taken when the router
-runs Linux, because the Windows router image has no `tcpdump`.
+Two independent things confirm the path. The first-hop check gates the test before any traffic
+is sent, and, when the router runs Linux, a packet capture counts the packets that actually
+crossed it. The capture line is absent for a Windows router because that image has no
+`tcpdump`.
+
+### Continuous redeploy test
+
+`test-redeploy-loop.ps1` answers a different question: does forwarding still perform after the
+router lands on a different host? Each iteration runs the throughput test and compares it with
+a baseline. While the result stays at or above 80 percent of the baseline the router VM is
+redeployed onto a new host and the test runs again. The loop stops on the first iteration that
+falls short, which is the placement worth investigating.
+
+```powershell
+.\test-redeploy-loop.ps1 -ResourceGroupName <resource-group>
+```
+
+| Switch | Purpose |
+| --- | --- |
+| `-BaselineGbps <n>` | Compare against a known figure instead of measuring one on the first iteration. |
+| `-ThresholdPercent <n>` | Acceptance threshold. Defaults to 80. |
+| `-MaxIterations <n>` | Stop after this many iterations. Defaults to 0, meaning run until a failure. |
+| `-RedeployTimeoutMinutes <n>` | How long to wait for the router VM after a redeploy. Defaults to 20. |
+| `-ResultCsvPath <path>` | Write the per-iteration results to CSV. |
+
+The script exits with code 1 when an iteration falls below the threshold, when the path check
+fails, or when a redeploy does not come back, so it can be dropped straight into a pipeline.
+
+```
+Iteration GbpsSent PercentOfBaseline Status     Detail
+--------- -------- ----------------- ------     ------
+        1     6.97            100.00 acceptable first hop 10.30.0.4, 4500 retransmits
+        2     6.58             94.50 acceptable first hop 10.30.0.4, 20216 retransmits
+```
+
+A redeploy takes several minutes, so budget roughly `DurationSeconds + 5 minutes` per
+iteration. Forwarding survives a redeploy because it is persisted in the guest: `IPEnableRouter`
+on Windows and the sysctl drop-in on Linux.
 
 ### Manual checks
 
@@ -209,6 +248,8 @@ its script changes.
 | Traffic works but bypasses the router after the first packet | ICMP redirects. The router must have `send_redirects=0` and the endpoints `accept_redirects=0`. These are per-interface settings, so the `all` and `default` sysctl keys alone are not enough. |
 | Connection refused immediately from the far endpoint | Nothing is listening, or the guest firewall on the destination blocks the port. The deployment opens `5000-6000` only. |
 | Windows router: `Set-NetIPInterface : No matching MSFT_NetIPInterface objects found` | Accelerated Networking exposes both the synthetic NetVSC NIC and the Mellanox virtual function as physical adapters that are `Up`. The VF has no IPv4 stack, so setting forwarding by adapter index fails. Enumerate `Get-NetIPInterface -AddressFamily IPv4` instead of `Get-NetAdapter -Physical`. |
+| A script run through `az vm run-command invoke` only executes its first line | A multi-line string passed to `--scripts` is split into separate arguments, so the remaining lines are consumed as if they were CLI arguments and `--query` is swallowed. Write the script to a file and pass `--scripts "@<file>"`, which is what these scripts do. |
+| A `run-command` script returns truncated output | Azure keeps only the last few kilobytes of stdout. Do the parsing on the VM and return a small summary, as `test-connectivity.ps1` does with the iperf3 JSON report. |
 
 ## Notes and constraints
 

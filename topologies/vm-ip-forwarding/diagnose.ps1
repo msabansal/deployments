@@ -69,13 +69,24 @@ echo "repair complete; ip_forward=$(cat /proc/sys/net/ipv4/ip_forward)"
 
 $script = if ($Repair) { "$repair`n$inspect" } else { $inspect }
 
-az vm run-command invoke `
-  --resource-group $ResourceGroupName `
-  --name $RouterVmName `
-  --command-id RunShellScript `
-  --scripts $script `
-  --query "value[].message" `
-  -o tsv
+# A multi-line string passed straight to --scripts is split by the CLI, so only the first line
+# runs and the remaining lines shadow later arguments such as --query. Passing the script
+# through a file with the @ prefix keeps it intact.
+$scriptFile = Join-Path ([System.IO.Path]::GetTempPath()) ("diagnose-{0}.sh" -f [guid]::NewGuid())
+($script -replace "`r`n", "`n") | Set-Content -NoNewline -Encoding utf8 $scriptFile
+
+try {
+  az vm run-command invoke `
+    --resource-group $ResourceGroupName `
+    --name $RouterVmName `
+    --command-id RunShellScript `
+    --scripts "@$scriptFile" `
+    --query "value[].message" `
+    -o tsv
+}
+finally {
+  Remove-Item -LiteralPath $scriptFile -ErrorAction SilentlyContinue
+}
 
 if ($LASTEXITCODE -ne 0) {
   throw "Run command failed with exit code $LASTEXITCODE."
