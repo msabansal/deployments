@@ -89,15 +89,27 @@ fi
 sysctl --system >/dev/null
 
 if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
-  firewall-cmd --permanent --add-port=${PORT_START}-${PORT_END}/tcp
-  firewall-cmd --permanent --add-port=${PORT_START}-${PORT_END}/udp
-  firewall-cmd --permanent --add-protocol=icmp || true
+  ZONE=$(firewall-cmd --get-default-zone)
+  echo "firewalld default zone: ${ZONE}"
+
+  firewall-cmd --permanent --zone="$ZONE" --add-port=${PORT_START}-${PORT_END}/tcp
+  firewall-cmd --permanent --zone="$ZONE" --add-port=${PORT_START}-${PORT_END}/udp
+  firewall-cmd --permanent --zone="$ZONE" --add-protocol=icmp || true
 
   if [ "$ROLE" = "router" ]; then
-    # firewalld runs on its own nftables table, so plain iptables FORWARD rules cannot
-    # override it. Intra-zone forwarding must be allowed through firewalld itself, and
-    # the direct rule keeps forwarding working across a firewall-cmd --reload.
-    firewall-cmd --permanent --add-forward || true
+    # A firewalld zone ends with an implicit "reject with icmpx admin-prohibited", which is
+    # what a router returns for transit traffic. That reject is emitted from firewalld's own
+    # inet firewalld nftables table, so an iptables FORWARD ACCEPT rule cannot override it
+    # and a direct rule only wins if it is evaluated first. Setting the zone target to ACCEPT
+    # removes the reject outright, which is the only reliable fix.
+    firewall-cmd --permanent --zone="$ZONE" --set-target=ACCEPT
+
+    # Allow traffic to be forwarded back out of the interface it arrived on. Supported from
+    # firewalld 0.9; older builds are already covered by the ACCEPT target above.
+    firewall-cmd --permanent --zone="$ZONE" --add-forward || \
+      echo "firewalld does not support --add-forward; relying on the ACCEPT zone target"
+
+    # Belt and braces for builds that keep a reject in the forward path regardless of target.
     firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -j ACCEPT || true
     firewall-cmd --permanent --direct --add-rule ipv6 filter FORWARD 0 -j ACCEPT || true
   fi
@@ -120,6 +132,14 @@ if command -v iptables >/dev/null 2>&1; then
 
   if [ "$ROLE" = "router" ]; then
     iptables -P FORWARD ACCEPT || true
+
+    # Drop any REJECT/DROP rule already sitting in the FORWARD chain, otherwise it still
+    # matches transit traffic ahead of the rules appended below.
+    while iptables -L FORWARD --line-numbers -n 2>/dev/null | awk 'NR>2 && ($1 ~ /^[0-9]+$/) && ($2 == "REJECT" || $2 == "DROP") { print $1; exit }' | grep -q .; do
+      line=$(iptables -L FORWARD --line-numbers -n | awk 'NR>2 && ($1 ~ /^[0-9]+$/) && ($2 == "REJECT" || $2 == "DROP") { print $1; exit }')
+      iptables -D FORWARD "$line" || break
+    done
+
     if ! iptables -C FORWARD -j ACCEPT 2>/dev/null; then
       iptables -I FORWARD 1 -j ACCEPT
     fi
@@ -140,8 +160,31 @@ if [ "$ROLE" = "router" ]; then
   fi
 
   if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
-    echo "firewalld forward policy: $(firewall-cmd --query-forward || true)"
+    ZONE=$(firewall-cmd --get-default-zone)
+    echo "firewalld zone target: $(firewall-cmd --permanent --zone="$ZONE" --get-target || true)"
+    echo "firewalld intra-zone forward: $(firewall-cmd --zone="$ZONE" --query-forward || true)"
   fi
+
+  # Fail loudly rather than leaving a router that silently answers every SYN with
+  # "ICMP administratively prohibited".
+  if command -v nft >/dev/null 2>&1; then
+    forward_rules=$(nft -a list ruleset 2>/dev/null | sed -n '/chain .*[Ff][Oo][Rr][Ww][Aa][Rr][Dd]/,/^\s*}/p' || true)
+    if echo "$forward_rules" | grep -qiE 'reject|drop'; then
+      echo "A reject or drop rule remains in an nftables forward chain:" >&2
+      echo "$forward_rules" >&2
+      exit 1
+    fi
+  fi
+
+  if command -v iptables >/dev/null 2>&1; then
+    if iptables -S FORWARD 2>/dev/null | grep -qE '^-A FORWARD .*-j (REJECT|DROP)'; then
+      echo "A reject or drop rule remains in the iptables FORWARD chain:" >&2
+      iptables -S FORWARD >&2
+      exit 1
+    fi
+  fi
+
+  echo "router forwarding path is clear"
 fi
 
 echo "configuration complete"
