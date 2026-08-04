@@ -76,7 +76,8 @@ az deployment group create `
   --name 'vm-ip-forwarding' `
   --template-file "$PSScriptRoot\main.bicep" `
   --parameters "$PSScriptRoot\main.bicepparam" `
-  --parameters $deploymentParameters
+  --parameters $deploymentParameters `
+  --output none
 
 if ($LASTEXITCODE -ne 0) {
   throw "Azure deployment failed with exit code $LASTEXITCODE."
