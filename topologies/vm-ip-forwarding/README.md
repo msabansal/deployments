@@ -155,6 +155,7 @@ its script changes.
 | SYN reaches the router and is forwarded, but nothing comes back | The *other* endpoint's route table, and `enableIPForwarding` on the router NIC. Azure drops transit packets when that flag is off. |
 | Traffic works but bypasses the router after the first packet | ICMP redirects. The router must have `send_redirects=0` and the endpoints `accept_redirects=0`. These are per-interface settings, so the `all` and `default` sysctl keys alone are not enough. |
 | Connection refused immediately from the far endpoint | Nothing is listening, or the guest firewall on the destination blocks the port. The deployment opens `5000-6000` only. |
+| Windows router: `Set-NetIPInterface : No matching MSFT_NetIPInterface objects found` | Accelerated Networking exposes both the synthetic NetVSC NIC and the Mellanox virtual function as physical adapters that are `Up`. The VF has no IPv4 stack, so setting forwarding by adapter index fails. Enumerate `Get-NetIPInterface -AddressFamily IPv4` instead of `Get-NetAdapter -Physical`. |
 
 ## Notes and constraints
 

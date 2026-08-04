@@ -38,8 +38,26 @@ Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters
   -Name 'IPEnableRouter' -Value 1 -Type DWord
 
 # Per-interface forwarding, which takes effect without a restart.
-Get-NetAdapter -Physical | Where-Object Status -eq 'Up' | ForEach-Object {
-  Set-NetIPInterface -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -Forwarding Enabled
+#
+# Accelerated Networking exposes two "physical" adapters: the synthetic NetVSC NIC and the
+# Mellanox virtual function bound underneath it. The VF has no IPv4 stack of its own, so
+# addressing it by adapter index throws "No matching MSFT_NetIPInterface objects found".
+# Enumerating the IPv4 interfaces directly only ever returns interfaces that can be set.
+$ipv4Interfaces = Get-NetIPInterface -AddressFamily IPv4 |
+  Where-Object { $_.ConnectionState -eq 'Connected' -and $_.InterfaceAlias -notlike 'Loopback*' }
+
+if (-not $ipv4Interfaces) {
+  throw 'No connected IPv4 interfaces were found on the router VM.'
+}
+
+foreach ($ipv4Interface in $ipv4Interfaces) {
+  try {
+    Set-NetIPInterface -InputObject $ipv4Interface -Forwarding Enabled
+    Write-Output "Forwarding enabled on $($ipv4Interface.InterfaceAlias) (ifIndex $($ipv4Interface.InterfaceIndex))"
+  }
+  catch {
+    Write-Output "Could not enable forwarding on $($ipv4Interface.InterfaceAlias): $($_.Exception.Message)"
+  }
 }
 
 $installResult = $null
@@ -69,6 +87,19 @@ Set-TopologyFirewallRule -Name 'Topology ICMPv4 echo' -Params @{ Protocol = 'ICM
 if ($installResult -and $installResult.RestartNeeded -eq 'Yes') {
   Write-Output 'Restart required by RemoteAccess installation; restarting in 120 seconds.'
   & shutdown.exe /r /t 120 /c 'Completing router role installation'
+}
+
+# Fail loudly rather than leaving a router that silently drops transit traffic.
+$router = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'IPEnableRouter').IPEnableRouter
+$forwardingState = Get-NetIPInterface -AddressFamily IPv4 |
+  Where-Object { $_.ConnectionState -eq 'Connected' -and $_.InterfaceAlias -notlike 'Loopback*' } |
+  Select-Object InterfaceAlias, InterfaceIndex, Forwarding
+
+Write-Output "IPEnableRouter=$router"
+$forwardingState | Format-Table -AutoSize | Out-String | Write-Output
+
+if (-not ($forwardingState | Where-Object Forwarding -eq 'Enabled')) {
+  throw 'IPv4 forwarding is not enabled on any connected interface of the router VM.'
 }
 
 Write-Output 'configuration complete'
