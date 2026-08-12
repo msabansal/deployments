@@ -20,9 +20,6 @@ param vmSize string
 @description('Storage account type for the OS disk. An empty string leaves the property off the VM, which is what a redeploy over an already-resized VM needs.')
 param osDiskStorageAccountType string = 'Premium_LRS'
 
-@description('Disk controller the VM boots from. NVMe keeps every size this topology uses on the same controller, so a resize never has to change it.')
-param diskControllerType string = 'NVMe'
-
 @description('Enable Accelerated Networking on the network interface.')
 param enableAcceleratedNetworking bool
 
@@ -39,10 +36,9 @@ var rawScript = '''
 $ErrorActionPreference = 'Stop'
 $portRange = '__PORT_START__-__PORT_END__'
 
-# Persistent global IPv4 forwarding. Set-NetIPInterface below is what actually enables
-# forwarding for this boot; this registry value keeps it enabled across a restart.
-Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' `
-  -Name 'IPEnableRouter' -Value 1 -Type DWord
+# Setting the persistent IPEnableRouter registry value is disabled for now, so this deployment
+# relies on Set-NetIPInterface below alone. That takes effect immediately but does not survive a
+# restart, which is deliberate while the two switches are being told apart.
 
 # Per-interface forwarding, which takes effect immediately and without a restart.
 #
@@ -82,8 +78,9 @@ Set-TopologyFirewallRule -Name 'Topology test traffic (TCP)' -Params @{ Protocol
 Set-TopologyFirewallRule -Name 'Topology test traffic (UDP)' -Params @{ Protocol = 'UDP'; LocalPort = $portRange }
 Set-TopologyFirewallRule -Name 'Topology ICMPv4 echo' -Params @{ Protocol = 'ICMPv4'; IcmpType = 8 }
 
-# Fail loudly rather than leaving a router that silently drops transit traffic.
-$router = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'IPEnableRouter').IPEnableRouter
+# Fail loudly rather than leaving a router that silently drops transit traffic. IPEnableRouter is
+# only reported, not asserted, because nothing sets it any more.
+$router = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'IPEnableRouter' -ErrorAction SilentlyContinue).IPEnableRouter
 $forwardingState = Get-NetIPInterface -AddressFamily IPv4 |
   Where-Object { $_.ConnectionState -eq 'Connected' -and $_.InterfaceAlias -notlike 'Loopback*' } |
   Select-Object InterfaceAlias, InterfaceIndex, Forwarding
@@ -166,7 +163,6 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
       }
     }
     storageProfile: {
-      diskControllerType: diskControllerType
       imageReference: {
         publisher: 'MicrosoftWindowsServer'
         offer: 'WindowsServer'

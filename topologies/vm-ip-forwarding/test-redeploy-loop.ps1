@@ -37,7 +37,7 @@
 .EXAMPLE
   .\test-redeploy-loop.ps1 -ResourceGroupName sabansal-fwd-01 -Location westus2 -Deploy `
     -RouterChange Recreate -IterationsBeforeChange 3 `
-    -InitialRouterVmSize Standard_D2s_v6 -ResizedRouterVmSize Standard_D4s_v6
+    -InitialRouterVmSize Standard_DS2_v2 -ResizedRouterVmSize Standard_D2s_v5
 #>
 [CmdletBinding()]
 param(
@@ -110,6 +110,11 @@ param(
   # Minutes to wait for the router VM to come back after a redeploy or a resize.
   [ValidateRange(1, 120)]
   [int] $RouterTimeoutMinutes = 20,
+
+  # Extra attempts made when a redeploy fails. A redeploy moves the VM to a different host, so it
+  # fails when the platform cannot place it, which usually clears on the next try.
+  [ValidateRange(0, 10)]
+  [int] $RedeployRetryCount = 3,
 
   # Written as CSV when set, so a long run can be inspected afterwards.
   [string] $ResultCsvPath,
@@ -451,14 +456,44 @@ function Invoke-RouterRedeploy {
   Write-Line "redeploying the router VM '$VmName' onto a different host..." 'Yellow'
   $started = Get-Date
 
-  az vm redeploy --resource-group $ResourceGroupName --name $VmName --only-show-errors | Out-Null
+  # A redeploy asks the platform to place the VM on a different host, so it fails when no host is
+  # free in the cluster, and it can also come back up too slowly for the readiness wait. Both clear
+  # on their own, so a long run should not end on one. Every attempt is reported so a run that only
+  # succeeded after retrying does not look clean in the log.
+  $attempts = 1 + $RedeployRetryCount
 
-  if ($LASTEXITCODE -ne 0) {
-    throw "Redeploy of '$VmName' failed with exit code $LASTEXITCODE."
+  for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+    az vm redeploy --resource-group $ResourceGroupName --name $VmName --only-show-errors | Out-Null
+
+    $failure = if ($LASTEXITCODE -ne 0) { "Redeploy of '$VmName' failed with exit code $LASTEXITCODE." } else { $null }
+
+    if (-not $failure) {
+      try {
+        Wait-VmReady -VmName $VmName -TimeoutMinutes $RouterTimeoutMinutes
+      }
+      catch {
+        $failure = $_.Exception.Message
+      }
+    }
+
+    if (-not $failure) {
+      $suffix = if ($attempt -gt 1) { " on attempt $attempt" } else { '' }
+      Write-Line ("router VM is running again after {0:N0} seconds$suffix" -f ((Get-Date) - $started).TotalSeconds) 'Green'
+      return
+    }
+
+    if ($attempt -eq $attempts) {
+      throw "$failure Gave up after $attempts attempts."
+    }
+
+    # A Ctrl+C during the retries should stop the run rather than sit through the whole backoff.
+    if (Test-ShouldStop) {
+      throw "$failure Stopped before retrying."
+    }
+
+    Write-Line "$failure Retrying, attempt $($attempt + 1) of $attempts." 'Yellow'
+    Start-Sleep -Seconds 30
   }
-
-  Wait-VmReady -VmName $VmName -TimeoutMinutes $RouterTimeoutMinutes
-  Write-Line ("router VM is running again after {0:N0} seconds" -f ((Get-Date) - $started).TotalSeconds) 'Green'
 }
 
 # Deleting the VM leaves the NIC in place, which matters: the router keeps the static address

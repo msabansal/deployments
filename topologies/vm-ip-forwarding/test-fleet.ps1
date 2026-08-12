@@ -27,7 +27,7 @@
 
 .EXAMPLE
   .\test-fleet.ps1 -ResourceGroupPrefix sabansal-fwd -Location westus2 -InstanceCount 2 `
-    -InitialRouterVmSize Standard_D2s_v6 -ResizedRouterVmSize Standard_D4s_v6
+    -InitialRouterVmSize Standard_DS2_v2 -ResizedRouterVmSize Standard_D2s_v5
 #>
 [CmdletBinding()]
 param(
@@ -69,6 +69,11 @@ param(
 
   [ValidateRange(1, 120)]
   [int] $RouterTimeoutMinutes = 20,
+
+  # Extra attempts made when a redeploy fails, because a redeploy that cannot be placed on another
+  # host usually succeeds on the next try.
+  [ValidateRange(0, 10)]
+  [int] $RedeployRetryCount = 3,
 
   [ValidateRange(1, 128)]
   [int] $ParallelConnections = 8,
@@ -186,6 +191,7 @@ $context = @{
   InitialRouterVmSize    = $InitialRouterVmSize
   ResizedRouterVmSize    = $ResizedRouterVmSize
   RouterTimeoutMinutes   = $RouterTimeoutMinutes
+  RedeployRetryCount     = $RedeployRetryCount
   ParallelConnections    = $ParallelConnections
   DurationSeconds        = $DurationSeconds
   ThresholdPercent       = $ThresholdPercent
@@ -262,6 +268,7 @@ $resourceGroups | ForEach-Object -ThrottleLimit $MaxParallel -Parallel {
     IterationsBeforeChange = $context.IterationsBeforeChange
     MaxIterations          = $context.MaxIterations
     RouterTimeoutMinutes   = $context.RouterTimeoutMinutes
+    RedeployRetryCount     = $context.RedeployRetryCount
     ParallelConnections    = $context.ParallelConnections
     DurationSeconds        = $context.DurationSeconds
     ThresholdPercent       = $context.ThresholdPercent
