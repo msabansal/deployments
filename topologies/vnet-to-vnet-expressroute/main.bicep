@@ -67,8 +67,8 @@ param peeringSharedKey string = ''
 @description('Create the two circuit-to-gateway connections.')
 param createConnections bool = true
 
-@description('Enable ExpressRoute FastPath on both connections. Requires a supported gateway SKU.')
-param enableFastPath bool = true
+@description('Enable ExpressRoute FastPath on both connections. Requires ErGw3AZ or UltraPerformance; ErGw1AZ and ErGw2AZ are not supported.')
+param enableFastPath bool = false
 
 @description('Create both virtual networks. When false, the named VNets and their workload and GatewaySubnet subnets must already exist; gateways, NSGs, VMs, and connections are still deployed.')
 param deployVirtualNetworks bool = true
@@ -144,6 +144,7 @@ module onPremTestVm 'modules/test-vm.bicep' = if (deployTestVms) {
     location: location
     vmName: '${namePrefix}-onprem-vm'
     subnetId: onPremNetwork.outputs.workloadSubnetId
+    peerWorkloadSubnetPrefix: azureWorkloadSubnetPrefix
     adminUsername: testVmAdminUsername
     adminPublicKey: testVmAdminPublicKey
     vmSize: testVmSize
@@ -156,6 +157,7 @@ module azureTestVm 'modules/test-vm.bicep' = if (deployTestVms) {
     location: location
     vmName: '${namePrefix}-azure-vm'
     subnetId: azureNetwork.outputs.workloadSubnetId
+    peerWorkloadSubnetPrefix: onPremWorkloadSubnetPrefix
     adminUsername: testVmAdminUsername
     adminPublicKey: testVmAdminPublicKey
     vmSize: testVmSize

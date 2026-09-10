@@ -3,8 +3,8 @@ using './main.bicep'
 param location = ''
 param namePrefix = 'vnet-to-vnet-er'
 
-param serviceProviderName = 'bvtazureixp03'
-param peeringLocation = 'Noida2'
+param serviceProviderName = 'Juniper1'
+param peeringLocation = 'Azure'
 param bandwidthInMbps = 1000
 
 param onPremVnetAddressPrefix = '10.0.0.0/16'
@@ -17,7 +17,7 @@ param azureGatewaySubnetPrefix = '10.1.255.224/27'
 
 param gatewaySku = 'ErGw1AZ'
 
-// The BVT provider is expected to provision the circuit automatically.
+// Private peering and connections require the provider to provision the circuit.
 param configurePrivatePeering = true
 param createConnections = true
 
@@ -27,7 +27,8 @@ param primaryPeerAddressPrefix = '192.168.0.0/30'
 param secondaryPeerAddressPrefix = '192.168.0.4/30'
 param peeringSharedKey = ''
 
-param enableFastPath = true
+// ErGw1AZ does not support FastPath.
+param enableFastPath = false
 
 param deployVirtualNetworks = true
 param deployGatewaysAndCircuit = true

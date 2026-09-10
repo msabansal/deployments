@@ -8,6 +8,15 @@ param adminPublicKey string
 
 param vmSize string
 
+@description('Peer workload IPv4 subnet allowed to reach guest test ports and ICMP. Empty installs tools without opening guest firewall rules.')
+param peerWorkloadSubnetPrefix string = ''
+
+var installer = replace(
+  replace(loadTextContent('../scripts/install-network-tools.sh'), '\r\n', '\n'),
+  '__PEER_SOURCE__',
+  peerWorkloadSubnetPrefix
+)
+
 resource publicIp 'Microsoft.Network/publicIPAddresses@2024-05-01' = {
   name: '${vmName}-pip'
   location: location
@@ -104,9 +113,8 @@ resource installNetworkTools 'Microsoft.Compute/virtualMachines/extensions@2024-
     type: 'CustomScript'
     typeHandlerVersion: '2.1'
     autoUpgradeMinorVersion: true
-    enableAutomaticUpgrade: true
     protectedSettings: {
-      commandToExecute: 'bash -c "set -euo pipefail; if command -v dnf >/dev/null 2>&1; then dnf install -y tcpdump iperf3; elif command -v tdnf >/dev/null 2>&1; then tdnf install -y tcpdump iperf3; else echo No_supported_package_manager_found >&2; exit 1; fi"'
+      script: base64(installer)
     }
   }
 }
