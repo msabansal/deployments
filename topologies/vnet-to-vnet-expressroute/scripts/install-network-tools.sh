@@ -11,7 +11,7 @@ else
   exit 1
 fi
 
-"$PKG" install -y iperf3 tcpdump iproute iputils traceroute nmap-ncat bind-utils python3 coreutils
+"$PKG" install -y iperf3 tcpdump iproute iputils traceroute nmap-ncat bind-utils python3
 for tool in iperf3 tcpdump ip ping traceroute ncat dig python3 timeout systemctl systemd-run ss; do
   command -v "$tool" >/dev/null || { echo "Required tool missing: $tool" >&2; exit 1; }
 done
