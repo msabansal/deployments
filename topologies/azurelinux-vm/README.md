@@ -41,8 +41,15 @@ az account set --subscription <subscription-id>
 .\deploy.ps1 `
   -ResourceGroupName <resource-group> `
   -Location <region> `
+  -VmName <vm-name> `
   -SshPublicKeyPath ~\.ssh\id_ed25519.pub
 ```
+
+`-VmName` defaults to `azurelinux-vm`. The VM uses this exact name; the VNet, NSG,
+NIC, and public IP are named `<vm-name>-vnet`, `<vm-name>-nsg`,
+`<vm-name>-nic`, and `<vm-name>-pip`. The name must contain 1-59 letters,
+digits, or hyphens and must start and end with a letter or digit. The 59-character
+limit leaves room for the suffixes on related Azure resources.
 
 Pass `-VmSize` to override the size in `main.bicepparam` for this deployment:
 
@@ -93,7 +100,7 @@ Edit `main.bicepparam` for non-secret deployment values:
 
 | Parameter | Default | Purpose |
 | --- | --- | --- |
-| `namePrefix` | `azlinux` | Prefix for resource names |
+| `vmName` | `azurelinux-vm` | Exact VM name; supplied from `-VmName` by the wrapper and used as the prefix for related resources |
 | `vnetAddressPrefix` | `10.40.0.0/16` | VNet address space |
 | `subnetAddressPrefix` | `10.40.0.0/24` | VM subnet within the VNet |
 | `adminUsername` | `azureuser` | SSH administrator |
@@ -101,7 +108,7 @@ Edit `main.bicepparam` for non-secret deployment values:
 | `osDiskStorageAccountType` | `StandardSSD_LRS` | OS disk tier; override with `-OsDiskStorageAccountType`; Premium storage requires a compatible size |
 | `diskControllerType` | `SCSI` | Disk controller; override with `-DiskControllerType`; must be supported by the size and image |
 | `imageVersion` | `latest` | Azure Linux 4 image version; pin a version for repeatability |
-| `publicIpDnsLabel` | `azlinux-<hash of resource group and namePrefix>` | Public IP DNS label; override with `-PublicIpDnsLabel` |
+| `publicIpDnsLabel` | `<lowercase vmName, truncated if needed>-<hash of resource group and vmName>` | Public IP DNS label; override with `-PublicIpDnsLabel` |
 | `location` | Supplied by wrapper | Azure region |
 | `adminPublicKey` | Supplied by wrapper | SSH public key read from `-SshPublicKeyPath` |
 

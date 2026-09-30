@@ -3,10 +3,10 @@ targetScope = 'resourceGroup'
 @description('Azure region for all resources. Must support the selected VM size and image.')
 param location string = resourceGroup().location
 
-@description('Prefix applied to every resource name.')
+@description('Virtual machine name. Related resources use this name as their prefix.')
 @minLength(1)
-@maxLength(40)
-param namePrefix string = 'azlinux'
+@maxLength(59)
+param vmName string = 'azurelinux-vm'
 
 @description('Address space of the virtual network.')
 param vnetAddressPrefix string = '10.40.0.0/16'
@@ -45,12 +45,10 @@ param imageVersion string = 'latest'
 @description('Public IP DNS label, unique within the Azure region. Use 3-63 lowercase letters, digits, or hyphens; start with a letter and end with a letter or digit.')
 @minLength(3)
 @maxLength(63)
-param publicIpDnsLabel string = 'azlinux-${uniqueString(resourceGroup().id, namePrefix)}'
-
-var vmName = '${namePrefix}-vm'
+param publicIpDnsLabel string = '${take(toLower(vmName), 49)}-${uniqueString(resourceGroup().id, vmName)}'
 
 resource nsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
-  name: '${namePrefix}-nsg'
+  name: '${vmName}-nsg'
   location: location
   properties: {
     securityRules: [
@@ -98,7 +96,7 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
 }
 
 resource vnet 'Microsoft.Network/virtualNetworks@2024-05-01' = {
-  name: '${namePrefix}-vnet'
+  name: '${vmName}-vnet'
   location: location
   properties: {
     addressSpace: {

@@ -8,6 +8,11 @@ param(
   [ValidateNotNullOrEmpty()]
   [string] $Location,
 
+  [ValidateNotNullOrEmpty()]
+  [ValidateLength(1, 59)]
+  [ValidatePattern('\A(?i:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)\z')]
+  [string] $VmName = 'azurelinux-vm',
+
   [string] $SshPublicKeyPath = '~\.ssh\id_ed25519.pub',
 
   [ValidateNotNullOrEmpty()]
@@ -86,6 +91,7 @@ if ($PSBoundParameters.ContainsKey('VmSize')) {
 $deploymentParameters = @(
   "location=$Location"
   "adminPublicKey=$publicKey"
+  "vmName=$VmName"
 )
 
 if ($PSBoundParameters.ContainsKey('VmSize')) {
@@ -115,7 +121,7 @@ if ($LASTEXITCODE -ne 0) {
 
 az deployment group create `
   --resource-group $ResourceGroupName `
-  --name 'azurelinux-vm' `
+  --name $VmName `
   --template-file "$PSScriptRoot\main.bicep" `
   --parameters "$PSScriptRoot\main.bicepparam" `
   --parameters $deploymentParameters `

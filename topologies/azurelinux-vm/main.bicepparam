@@ -1,6 +1,6 @@
 using 'main.bicep'
 
-param namePrefix = 'azlinux'
+param vmName = 'azurelinux-vm'
 param vnetAddressPrefix = '10.40.0.0/16'
 param subnetAddressPrefix = '10.40.0.0/24'
 param adminUsername = 'azureuser'
