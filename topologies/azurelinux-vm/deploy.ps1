@@ -38,6 +38,51 @@ if ([string]::IsNullOrWhiteSpace($publicKey)) {
   throw "SSH public key file is empty: $resolvedKeyPath"
 }
 
+if ($PSBoundParameters.ContainsKey('VmSize')) {
+  $skuJson = az vm list-skus `
+    --location $Location `
+    --resource-type virtualMachines `
+    --size $VmSize `
+    --all `
+    --output json
+
+  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($skuJson)) {
+    throw "Could not query capabilities for VM size '$VmSize' in '$Location'."
+  }
+
+  $sku = @($skuJson | ConvertFrom-Json) |
+    Where-Object { $_.name -eq $VmSize } |
+    Select-Object -First 1
+
+  if (-not $sku) {
+    throw "VM size '$VmSize' is not available in '$Location'."
+  }
+
+  $diskControllerCapability = $sku.capabilities |
+    Where-Object { $_.name -eq 'DiskControllerTypes' } |
+    Select-Object -First 1
+
+  if (-not $diskControllerCapability) {
+    throw "VM size '$VmSize' does not report its supported disk controller types."
+  }
+
+  $supportedDiskControllerTypes = @(
+    $diskControllerCapability.value -split ',' |
+      ForEach-Object { $_.Trim() } |
+      Where-Object { $_ }
+  )
+
+  if ($PSBoundParameters.ContainsKey('DiskControllerType')) {
+    if ($DiskControllerType -notin $supportedDiskControllerTypes) {
+      throw "VM size '$VmSize' does not support disk controller '$DiskControllerType'. Supported types: $($supportedDiskControllerTypes -join ', ')."
+    }
+  }
+  elseif ($supportedDiskControllerTypes.Count -eq 1) {
+    $DiskControllerType = $supportedDiskControllerTypes[0]
+    Write-Host "Using disk controller '$DiskControllerType' required by VM size '$VmSize'."
+  }
+}
+
 $deploymentParameters = @(
   "location=$Location"
   "adminPublicKey=$publicKey"
@@ -51,7 +96,7 @@ if ($PSBoundParameters.ContainsKey('OsDiskStorageAccountType')) {
   $deploymentParameters += "osDiskStorageAccountType=$OsDiskStorageAccountType"
 }
 
-if ($PSBoundParameters.ContainsKey('DiskControllerType')) {
+if ($DiskControllerType) {
   $deploymentParameters += "diskControllerType=$DiskControllerType"
 }
 

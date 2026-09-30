@@ -52,7 +52,10 @@ Pass `-VmSize` to override the size in `main.bicepparam` for this deployment:
 
 Omit `-VmSize` to keep the parameter file's value (`Standard_D4d_v5` by default).
 The selected size must support the configured disk tier, disk controller, and
-Accelerated Networking. To use a Premium-storage-capable, NVMe-based size instead:
+Accelerated Networking. When `-VmSize` is supplied, the wrapper queries the SKU in
+the target region. If it supports only one disk controller type, the wrapper selects
+that controller automatically. An incompatible explicit `-DiskControllerType` is
+rejected before deployment. To use a Premium-storage-capable, NVMe-based size instead:
 
 ```powershell
 .\deploy.ps1 -ResourceGroupName <resource-group> -Location <region> `
