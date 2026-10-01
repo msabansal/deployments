@@ -337,6 +337,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--key", default=str(pathlib.Path.home() / ".ssh" / "id_ed25519"))
     parser.add_argument("--duration", type=int, default=120)
+    parser.add_argument("--protocol", choices=("udp", "tcp"), default="udp")
     parser.add_argument("--migrate-after", type=int, default=30)
     parser.add_argument("--output-directory")
     parser.add_argument("--in-band-control", action="store_true",
@@ -454,7 +455,8 @@ def run_measurement(experiment, release, onboard, args, before_other):
     identifier = uuid.uuid4().hex
     csv_path = f"/var/tmp/swift-ilb-migration-{identifier}.csv"
     report_path = f"/var/tmp/swift-ilb-migration-{identifier}.json"
-    if not args.in_band_control:
+    in_band_control = args.in_band_control or args.protocol == "tcp"
+    if not in_band_control:
         experiment.bridge_control()
     throughput_server = experiment.prepare(
         SERVER, "throughput server",
@@ -498,11 +500,12 @@ PY""", timeout=150)
                                f"--target 10.80.2.4 --port 5202 --duration {args.duration + 10} "
                                f"--rate 100 --timeout 0.5 --late-grace 3 --log '{csv_path}' "
                                f"--log-format csv --report '{report_path}'")
+    traffic_options = "-u -P 2 -b 2500M -l 1380 --gsro" if args.protocol == "udp" else "-P 2"
     load = experiment.prepare(CLIENT, "120-second throughput",
                               "set -euo pipefail\n"
                               "echo __LOAD_STARTED__\n"
                               f"timeout {args.duration + 60} /usr/local/bin/iperf3 -c 10.80.2.4 "
-                              f"-p 5203 -u -P 2 -b 2500M -l 1380 -t {args.duration} --gsro --json")
+                              f"-p 5203 {traffic_options} -t {args.duration} --json")
     timings = {}
     probe_ready = []
     before_source = forwarded(experiment, SOURCE)
@@ -544,6 +547,7 @@ PY""", timeout=150)
                         args.duration + 120, "migration, throughput, and probes", observe)
         (output / "controller-timings.json").write_text(json.dumps(timings, indent=2))
         (output / "iperf-output.log").write_text("\n".join(load.lines))
+        (output / "iperf-server-output.log").write_text("\n".join(throughput_server.lines))
         report = json.loads(experiment.command(CLIENT, f"sudo cat '{report_path}'"))
         (output / "probe-report.json").write_text(json.dumps(report, indent=2))
         (output / "probe.csv").write_text(experiment.command(CLIENT, f"sudo cat '{csv_path}'"))
@@ -596,7 +600,8 @@ PY""", timeout=150)
             raise RuntimeError("Unexpected destination network containers")
         summary = {
             "duration_s": args.duration,
-            "iperf_control_path": "ilb_in_band" if args.in_band_control else "ssh_out_of_band",
+            "protocol": args.protocol,
+            "iperf_control_path": "ilb_in_band" if in_band_control else "ssh_out_of_band",
             "migration_requested_at_s": args.migrate_after,
             "source": SOURCE,
             "destination": DESTINATION,
@@ -616,7 +621,6 @@ PY""", timeout=150)
             "sent_seconds": sent_seconds,
             "received_seconds": throughput["end"]["sum_received"]["seconds"],
             "received_gbps": throughput["end"]["sum_received"]["bits_per_second"] / 1e9,
-            "loss_percent": throughput["end"]["sum_received"]["lost_percent"],
             "destination_forwarded": destination_forwarded,
             "inactive_attachment_forwarded": after_other - before_other,
             "inactive_attachment_forwarded_before": before_other,
@@ -627,6 +631,10 @@ PY""", timeout=150)
             "max_chronological_receive_gap_s": report["max_chronological_receive_gap_s"],
             "probe_report": report,
         }
+        if args.protocol == "udp":
+            summary["loss_percent"] = throughput["end"]["sum_received"]["lost_percent"]
+        else:
+            summary["retransmits"] = throughput["end"]["sum_sent"]["retransmits"]
         (output / "summary.json").write_text(json.dumps(summary, indent=2))
         (output / "iperf.json").write_text(json.dumps(throughput, indent=2))
         (output / "probe.csv").write_text(experiment.command(CLIENT, f"sudo cat '{csv_path}'"))

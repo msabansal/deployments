@@ -137,6 +137,32 @@ existing customer TCP connection survives the cutover. Use `--in-band-control`
 to reproduce that control-session behavior instead.
 Run `python .\test-migration-unit.py` for the offline coordinator regressions.
 
+To test established TCP connections across the same 120-second window:
+
+```powershell
+python .\test-migration.py `
+  --protocol tcp `
+  --duration 120 `
+  --migrate-after 30 `
+  --output-directory "$env:TEMP\swift-ilb-tcp-migration-results"
+```
+
+TCP uses two unthrottled data streams. Both data and iperf control stay on the
+ILB path: the UDP-only SSH control-redirection rule must never redirect TCP
+benchmark data. Reports contain TCP retransmissions rather than UDP loss
+percentages. The independent echo probe still measures UDP reachability, not
+TCP-session recovery. Client and server raw iperf logs are retained even if
+the control session times out, so a failed TCP run is not reported as success.
+
+The 2026-10-01 TCP run transferred roughly 8-9 Gbit/s before cutover. Both
+client and server intervals show zero progress after approximately 32 seconds,
+with no recovery during the remaining 88 seconds of the requested window.
+The server eventually reported an idle receive timeout; the client was killed
+by the 180-second safety timeout while waiting for completion. Its final
+180-second aggregate and zero receiver placeholder are not valid 120-second
+throughput results. The independent UDP echo recovered after a 4.600-second
+gap, which does not imply recovery of the established TCP connections.
+
 Each run first restores `10.80.0.5` to router-1. It then sends the same
 two-stream, aggregate 5-Gbit/s UDP GSRO workload for 120 seconds, migrating
 router-1 to router-2 about 30 seconds into the run. Router-2 keeps its separate

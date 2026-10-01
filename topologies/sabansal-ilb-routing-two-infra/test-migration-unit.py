@@ -40,7 +40,7 @@ class FakeJob:
         elif self.name == "120-second throughput":
             self.emit("__LOAD_STARTED__")
             self.emit(json.dumps({"end": {
-                "sum_sent": {"bits_per_second": 5e9, "seconds": 120},
+                "sum_sent": {"bits_per_second": 5e9, "seconds": 120, "retransmits": 123},
                 "sum_received": {"bits_per_second": 4e9, "lost_percent": 20, "seconds": 120}}}))
         elif self.name == "release":
             self.emit("[swiftcmd] NC deletion acknowledged: test-nc")
@@ -88,6 +88,7 @@ class FakeExperiment:
 
     def prepare(self, host, name, command):
         job = FakeJob(self, name)
+        job.command = command
         self.jobs.append(job)
         return job
 
@@ -121,7 +122,7 @@ class Tests(unittest.TestCase):
                 patch.object(module.time, "perf_counter", lambda: experiment.now), \
                 patch.object(module, "forwarded", side_effect=[0, 0, 0, 100]):
             args = types.SimpleNamespace(duration=120, migrate_after=30, output_directory=output,
-                                         before_other_nc="retained", in_band_control=True)
+                                         before_other_nc="retained", in_band_control=True, protocol="udp")
             result = module.run_measurement(experiment, release, onboard, args, 0)
             self.assertEqual(result["duration_s"], 120)
             self.assertEqual(result["ack_observation_to_destination_trigger_ms"], 0)
@@ -142,7 +143,7 @@ class Tests(unittest.TestCase):
                 patch.object(module.time, "perf_counter", lambda: experiment.now), \
                 patch.object(module, "forwarded", side_effect=[0, 1, 0, 100]):
             args = types.SimpleNamespace(duration=120, migrate_after=30, output_directory=output,
-                                         before_other_nc="retained", in_band_control=True)
+                                         before_other_nc="retained", in_band_control=True, protocol="udp")
             result = module.run_measurement(experiment, release, onboard, args, 0)
             self.assertFalse(result["forwarding_isolation_passed"])
             self.assertEqual(result["inactive_attachment_forwarded"], 1)
@@ -155,6 +156,24 @@ class Tests(unittest.TestCase):
         job.name = "already started"
         with self.assertRaisesRegex(RuntimeError, "Refusing to replay"):
             job.start()
+
+    def test_tcp_data_does_not_use_udp_control_bridge(self):
+        experiment = FakeExperiment()
+        release = experiment.prepare("", "release", "")
+        experiment.release = release
+        onboard = experiment.prepare("", "onboard", "")
+        with tempfile.TemporaryDirectory() as output, \
+                patch.object(module.time, "perf_counter", lambda: experiment.now), \
+                patch.object(module, "forwarded", side_effect=[0, 0, 0, 100]):
+            args = types.SimpleNamespace(duration=120, migrate_after=30, output_directory=output,
+                                         before_other_nc="retained", in_band_control=False, protocol="tcp")
+            result = module.run_measurement(experiment, release, onboard, args, 0)
+            self.assertEqual(result["iperf_control_path"], "ilb_in_band")
+            self.assertEqual(result["retransmits"], 123)
+            self.assertNotIn("loss_percent", result)
+            load = next(job for job in experiment.jobs if job.name == "120-second throughput")
+            self.assertNotIn(" -u ", load.command)
+            self.assertNotIn("--gsro", load.command)
 
     def test_go_uses_linux_newline_on_windows(self):
         stream = io.BytesIO()
