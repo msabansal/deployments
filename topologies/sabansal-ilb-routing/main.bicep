@@ -321,6 +321,7 @@ module router1 'modules/linux-vm.bicep' = {
     vmSize: vmSize
     primaryPrivateIpAddress: router1PrimaryIp
     secondaryPrivateIpAddress: router1SecondaryIp
+    sharedBackendIpAddress: router1SecondaryIp
     isRouter: true
   }
 }
@@ -335,6 +336,7 @@ module router2 'modules/linux-vm.bicep' = {
     adminPublicKey: adminPublicKey
     vmSize: vmSize
     primaryPrivateIpAddress: router2PrimaryIp
+    sharedBackendIpAddress: router1SecondaryIp
     isRouter: true
   }
 }
@@ -344,6 +346,7 @@ output loadBalancerName string = loadBalancer.name
 output loadBalancerFrontendIp string = ilbFrontendIp
 output backendPoolName string = backendPoolName
 output backendPoolIp string = router1SecondaryIp
+output virtualNetworkName string = vnet.name
 output vm1Name string = vm1.outputs.vmName
 output vm1NicName string = vm1.outputs.nicName
 output vm1PrivateIp string = vm1PrivateIp
@@ -353,7 +356,9 @@ output vm2NicName string = vm2.outputs.nicName
 output vm2PrivateIp string = vm2PrivateIp
 output vm2SubnetPrefix string = vm2SubnetPrefix
 output router1Name string = router1.outputs.vmName
+output router1NicName string = router1.outputs.nicName
 output router1PrimaryIp string = router1PrimaryIp
 output router1SecondaryIp string = router1SecondaryIp
 output router2Name string = router2.outputs.vmName
+output router2NicName string = router2.outputs.nicName
 output router2PrimaryIp string = router2PrimaryIp

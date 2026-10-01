@@ -28,39 +28,32 @@ NICs have Azure IP forwarding enabled, while the guest configuration enables
 IPv4 forwarding, disables reverse-path filtering and redirects, and permits
 forwarded traffic.
 
-The backend remains IP-based during a router migration. Both router guests run
-an IMDS-backed service that detects secondary NIC IP ownership changes and
-reconciles the addresses on `eth0`. The backend address uses administrative
-state `Up` so that moving `10.80.0.5` between NICs does not leave the unchanged
-backend suppressed while the health-probe mapping converges. This override is
-appropriate here because the pool intentionally contains exactly one
-controlled router IP.
+The backend remains IP-based during a router migration. Both router guests
+configure `10.80.0.5/32` on `eth0`; they do not poll IMDS. Azure control-plane
+ownership of the secondary NIC IP determines which router receives traffic for
+that address. The backend address uses administrative state `Up` so that moving
+`10.80.0.5` between NICs does not leave the unchanged backend suppressed while
+the health-probe mapping converges. This override is appropriate here because
+the pool intentionally contains exactly one controlled router IP.
 
 To migrate the backend without recreating or changing the pool address:
 
 ```powershell
-az network nic ip-config delete `
-  --resource-group sabansal-ilb-routing-rg `
-  --nic-name sabansal-ilb-routing-router1-nic `
-  --name secondary
+az feature register `
+  --namespace Microsoft.Network `
+  --name AllowMoveIpConfigurations
 
-$subnetId = az network vnet subnet show `
-  --resource-group sabansal-ilb-routing-rg `
-  --vnet-name sabansal-ilb-routing-vnet `
-  --name router `
-  --query id `
-  --output tsv
+# Wait until the feature state is Registered, then refresh the provider.
+az provider register --namespace Microsoft.Network
 
-az network nic ip-config create `
-  --resource-group sabansal-ilb-routing-rg `
-  --nic-name sabansal-ilb-routing-router2-nic `
-  --name secondary `
-  --private-ip-address 10.80.0.5 `
-  --subnet $subnetId
+.\move-backend-ip.ps1 -DestinationRouter 2
 ```
 
-Reverse the NIC names to migrate the address back. Do not delete or recreate
-the load-balancer backend address or HA Ports rule.
+The script uses the virtual network `moveIpConfigurations` REST action, which
+moves the secondary IP configuration between NICs as one Azure control-plane
+operation. This avoids the unassigned interval caused by separate NIC delete
+and create requests. Use `-DestinationRouter 1` to move it back. The IP-based
+backend pool and HA Ports rule remain unchanged.
 
 ## Deploy and test
 

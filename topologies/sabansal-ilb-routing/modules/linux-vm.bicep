@@ -23,6 +23,9 @@ param primaryPrivateIpAddress string
 @description('Optional static secondary private IP address.')
 param secondaryPrivateIpAddress string = ''
 
+@description('Optional shared backend IP configured in the router guest.')
+param sharedBackendIpAddress string = ''
+
 @description('Enable Azure NIC IP forwarding and guest forwarding.')
 param isRouter bool = false
 
@@ -31,6 +34,7 @@ var configureScript = '''
 set -euo pipefail
 
 ROLE=__ROLE__
+SHARED_BACKEND_IP=__SHARED_BACKEND_IP__
 
 if command -v tdnf >/dev/null 2>&1; then
   PKG=tdnf
@@ -103,68 +107,31 @@ ethtool -K eth0 gro on gso on tso on 2>/dev/null || true
 ethtool -K eth0 rx-udp-gro-forwarding on 2>/dev/null || true
 
 if [ "$ROLE" = "router" ]; then
-  cat >/usr/local/sbin/sync-azure-secondary-ips <<'EOF'
+  systemctl disable --now sync-azure-secondary-ips.service 2>/dev/null || true
+  rm -f /etc/systemd/system/sync-azure-secondary-ips.service
+  rm -f /usr/local/sbin/sync-azure-secondary-ips
+
+  cat >/usr/local/sbin/configure-shared-backend-ip <<'EOF'
 #!/bin/bash
 set -euo pipefail
 
-state_file=/run/azure-secondary-ips
-metadata_url='http://169.254.169.254/metadata/instance?api-version=2021-02-01'
-
-while true; do
-  desired=$(
-    curl -fsS --noproxy '*' -H Metadata:true "$metadata_url" |
-      python3 -c '
-import json
-import sys
-
-metadata = json.load(sys.stdin)
-interfaces = metadata.get("network", {}).get("interface", [])
-addresses = interfaces[0].get("ipv4", {}).get("ipAddress", []) if interfaces else []
-for address in addresses[1:]:
-    private_ip = address.get("privateIpAddress")
-    if private_ip:
-        print(private_ip)
-'
-  ) || {
-    sleep 1
-    continue
-  }
-
-  previous=$(cat "$state_file" 2>/dev/null || true)
-  for address in $previous; do
-    if ! grep -qx "$address" <<<"$desired"; then
-      while read -r configured_address; do
-        ip address del "$configured_address" dev eth0 2>/dev/null || true
-      done < <(ip -4 -o address show dev eth0 | awk -v address="$address" '$4 ~ "^" address "/" { print $4 }')
-    fi
-  done
-  for address in $desired; do
-    while read -r configured_address; do
-      if [ "$configured_address" != "$address/32" ]; then
-        ip address del "$configured_address" dev eth0 2>/dev/null || true
-      fi
-    done < <(ip -4 -o address show dev eth0 | awk -v address="$address" '$4 ~ "^" address "/" { print $4 }')
-    if ! ip -4 -o address show dev eth0 | awk '{ print $4 }' | grep -qx "$address/32"; then
-      ip address add "$address/32" dev eth0
-    fi
-  done
-  printf '%s\n' "$desired" >"$state_file"
-  sleep 1
-done
+address="$1"
+if ! ip -4 -o address show dev eth0 | awk '{ print $4 }' | grep -qx "$address/32"; then
+  ip address add "$address/32" dev eth0
+fi
 EOF
-  chmod 0755 /usr/local/sbin/sync-azure-secondary-ips
+  chmod 0755 /usr/local/sbin/configure-shared-backend-ip
 
-  cat >/etc/systemd/system/sync-azure-secondary-ips.service <<'EOF'
+  cat >/etc/systemd/system/configure-shared-backend-ip.service <<EOF
 [Unit]
-Description=Synchronize Azure secondary private IP addresses
+Description=Configure shared load balancer backend IP
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
-ExecStart=/usr/local/sbin/sync-azure-secondary-ips
-Restart=always
-RestartSec=1
+Type=oneshot
+ExecStart=/usr/local/sbin/configure-shared-backend-ip $SHARED_BACKEND_IP
+RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -172,8 +139,8 @@ EOF
   systemctl daemon-reload
   systemctl disable --now configure-secondary-ip.service 2>/dev/null || true
   rm -f /etc/systemd/system/configure-secondary-ip.service
-  systemctl enable sync-azure-secondary-ips.service
-  systemctl restart sync-azure-secondary-ips.service
+  systemctl enable configure-shared-backend-ip.service
+  systemctl restart configure-shared-backend-ip.service
 fi
 
 if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
@@ -205,7 +172,11 @@ fi
 echo TOPOLOGY_VM_CONFIGURED
 '''
 
-var script = replace(configureScript, '__ROLE__', isRouter ? 'router' : 'endpoint')
+var script = replace(
+  replace(configureScript, '__ROLE__', isRouter ? 'router' : 'endpoint'),
+  '__SHARED_BACKEND_IP__',
+  sharedBackendIpAddress
+)
 
 resource publicIp 'Microsoft.Network/publicIPAddresses@2024-05-01' = {
   name: '${vmName}-pip'
