@@ -36,9 +36,9 @@ var installToolsScript = '''
 set -euo pipefail
 
 if command -v tdnf >/dev/null 2>&1; then
-  tdnf install -y wireguard-tools iproute iputils ethtool curl tar gcc make autoconf automake libtool openssl-devel
+  tdnf install -y wireguard-tools iproute iputils ethtool curl tar gcc make autoconf automake libtool openssl-devel golang
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y wireguard-tools iproute iputils ethtool curl tar gcc make autoconf automake libtool openssl-devel
+  dnf install -y wireguard-tools iproute iputils ethtool curl tar gcc make autoconf automake libtool openssl-devel golang
 else
   echo "No supported package manager found" >&2
   exit 1
@@ -93,6 +93,7 @@ if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewa
   firewall-cmd --permanent --add-port=51820/udp
   firewall-cmd --permanent --add-port=5201/tcp
   firewall-cmd --permanent --add-port=5201/udp
+  firewall-cmd --permanent --add-port=4433/udp
   firewall-cmd --reload
 fi
 

@@ -72,3 +72,27 @@ Benchmark the direct VNet path instead of the WireGuard tunnel:
 Direct mode targets `10.70.0.4` and fails if the selected route uses `wg0`.
 Pass `-UdpTargetMbps <n>` to override the automatic UDP target.
 Pass `-UdpDatagramBytes <n>` to test a different UDP datagram size.
+
+## HTTP/3 throughput
+
+The topology includes a purpose-built HTTP/3 client and server based on
+`quic-go`. The server streams generated data over QUIC without reading from
+disk, and the client reports application goodput plus whole-VM CPU utilization
+on both VMs over the same measurement interval.
+
+Run the 30-second direct VNet test:
+
+```powershell
+.\test-http3-throughput.ps1 `
+  -ResourceGroupName sabansal-wireguard-rg `
+  -Path Direct `
+  -ParallelRequests 8 `
+  -DurationSeconds 30
+```
+
+To benchmark HTTP/3 inside WireGuard, use `-Path WireGuard`. The script verifies
+the selected route, installs and builds the pinned HTTP/3 benchmark on both VMs,
+opens UDP port 4433 in the guest firewall, starts the server, runs the timed
+transfer, and stops the server. The private benchmark uses an ephemeral
+self-signed certificate and disables certificate verification on its dedicated
+client.
