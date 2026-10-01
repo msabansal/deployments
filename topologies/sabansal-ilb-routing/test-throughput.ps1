@@ -156,10 +156,7 @@ if ($LASTEXITCODE -ne 0 -or -not $backendIpsJson) {
 
 $backendIps = @($backendIpsJson | ConvertFrom-Json)
 if ($backendIps.Count -ne 1 -or $backendIps[0] -ne $router1SecondaryIp) {
-  throw "Backend pool must contain only router-1 secondary IP $router1SecondaryIp; actual: $($backendIps -join ', ')."
-}
-if ($backendIps -contains $router2PrimaryIp) {
-  throw "Router-2 IP $router2PrimaryIp must not be in the backend pool."
+  throw "Backend pool must contain only active secondary IP $router1SecondaryIp; actual: $($backendIps -join ', ')."
 }
 
 Assert-EffectiveRoute -NicName $vm1NicName -DestinationPrefix $vm2SubnetPrefix -ExpectedNextHopIp $ilbFrontendIp

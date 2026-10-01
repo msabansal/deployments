@@ -271,8 +271,9 @@ resource backendPool 'Microsoft.Network/loadBalancers/backendAddressPools@2024-0
   properties: {
     loadBalancerBackendAddresses: [
       {
-        name: 'router1-secondary'
+        name: 'active-router-secondary'
         properties: {
+          adminState: 'Up'
           virtualNetwork: {
             id: vnet.id
           }

@@ -28,6 +28,40 @@ NICs have Azure IP forwarding enabled, while the guest configuration enables
 IPv4 forwarding, disables reverse-path filtering and redirects, and permits
 forwarded traffic.
 
+The backend remains IP-based during a router migration. Both router guests run
+an IMDS-backed service that detects secondary NIC IP ownership changes and
+reconciles the addresses on `eth0`. The backend address uses administrative
+state `Up` so that moving `10.80.0.5` between NICs does not leave the unchanged
+backend suppressed while the health-probe mapping converges. This override is
+appropriate here because the pool intentionally contains exactly one
+controlled router IP.
+
+To migrate the backend without recreating or changing the pool address:
+
+```powershell
+az network nic ip-config delete `
+  --resource-group sabansal-ilb-routing-rg `
+  --nic-name sabansal-ilb-routing-router1-nic `
+  --name secondary
+
+$subnetId = az network vnet subnet show `
+  --resource-group sabansal-ilb-routing-rg `
+  --vnet-name sabansal-ilb-routing-vnet `
+  --name router `
+  --query id `
+  --output tsv
+
+az network nic ip-config create `
+  --resource-group sabansal-ilb-routing-rg `
+  --nic-name sabansal-ilb-routing-router2-nic `
+  --name secondary `
+  --private-ip-address 10.80.0.5 `
+  --subnet $subnetId
+```
+
+Reverse the NIC names to migrate the address back. Do not delete or recreate
+the load-balancer backend address or HA Ports rule.
+
 ## Deploy and test
 
 ```powershell

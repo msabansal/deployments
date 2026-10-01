@@ -31,7 +31,6 @@ var configureScript = '''
 set -euo pipefail
 
 ROLE=__ROLE__
-SECONDARY_IP=__SECONDARY_IP__
 
 if command -v tdnf >/dev/null 2>&1; then
   PKG=tdnf
@@ -103,24 +102,78 @@ sysctl --system >/dev/null
 ethtool -K eth0 gro on gso on tso on 2>/dev/null || true
 ethtool -K eth0 rx-udp-gro-forwarding on 2>/dev/null || true
 
-if [ -n "$SECONDARY_IP" ]; then
-  cat >/etc/systemd/system/configure-secondary-ip.service <<EOF
+if [ "$ROLE" = "router" ]; then
+  cat >/usr/local/sbin/sync-azure-secondary-ips <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+state_file=/run/azure-secondary-ips
+metadata_url='http://169.254.169.254/metadata/instance?api-version=2021-02-01'
+
+while true; do
+  desired=$(
+    curl -fsS --noproxy '*' -H Metadata:true "$metadata_url" |
+      python3 -c '
+import json
+import sys
+
+metadata = json.load(sys.stdin)
+interfaces = metadata.get("network", {}).get("interface", [])
+addresses = interfaces[0].get("ipv4", {}).get("ipAddress", []) if interfaces else []
+for address in addresses[1:]:
+    private_ip = address.get("privateIpAddress")
+    if private_ip:
+        print(private_ip)
+'
+  ) || {
+    sleep 1
+    continue
+  }
+
+  previous=$(cat "$state_file" 2>/dev/null || true)
+  for address in $previous; do
+    if ! grep -qx "$address" <<<"$desired"; then
+      while read -r configured_address; do
+        ip address del "$configured_address" dev eth0 2>/dev/null || true
+      done < <(ip -4 -o address show dev eth0 | awk -v address="$address" '$4 ~ "^" address "/" { print $4 }')
+    fi
+  done
+  for address in $desired; do
+    while read -r configured_address; do
+      if [ "$configured_address" != "$address/32" ]; then
+        ip address del "$configured_address" dev eth0 2>/dev/null || true
+      fi
+    done < <(ip -4 -o address show dev eth0 | awk -v address="$address" '$4 ~ "^" address "/" { print $4 }')
+    if ! ip -4 -o address show dev eth0 | awk '{ print $4 }' | grep -qx "$address/32"; then
+      ip address add "$address/32" dev eth0
+    fi
+  done
+  printf '%s\n' "$desired" >"$state_file"
+  sleep 1
+done
+EOF
+  chmod 0755 /usr/local/sbin/sync-azure-secondary-ips
+
+  cat >/etc/systemd/system/sync-azure-secondary-ips.service <<'EOF'
 [Unit]
-Description=Configure Azure secondary private IP
+Description=Synchronize Azure secondary private IP addresses
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-ExecStart=/usr/sbin/ip address replace ${SECONDARY_IP}/32 dev eth0
-RemainAfterExit=yes
+Type=simple
+ExecStart=/usr/local/sbin/sync-azure-secondary-ips
+Restart=always
+RestartSec=1
 
 [Install]
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now configure-secondary-ip.service
-  ip -4 address show dev eth0 | grep -q "$SECONDARY_IP"
+  systemctl disable --now configure-secondary-ip.service 2>/dev/null || true
+  rm -f /etc/systemd/system/configure-secondary-ip.service
+  systemctl enable sync-azure-secondary-ips.service
+  systemctl restart sync-azure-secondary-ips.service
 fi
 
 if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
@@ -152,11 +205,7 @@ fi
 echo TOPOLOGY_VM_CONFIGURED
 '''
 
-var script = replace(
-  replace(configureScript, '__ROLE__', isRouter ? 'router' : 'endpoint'),
-  '__SECONDARY_IP__',
-  secondaryPrivateIpAddress
-)
+var script = replace(configureScript, '__ROLE__', isRouter ? 'router' : 'endpoint')
 
 resource publicIp 'Microsoft.Network/publicIPAddresses@2024-05-01' = {
   name: '${vmName}-pip'
