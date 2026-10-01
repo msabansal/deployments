@@ -9,9 +9,9 @@ sabansal-wireguard-client                     sabansal-wireguard-server
 WireGuard 10.200.0.2  =====================>  WireGuard 10.200.0.1
 ```
 
-The client connects to the server's private VNet address. Throughput is measured
-with iperf3 against the server's WireGuard address, and the test fails unless the
-route uses the `wg0` interface.
+The client connects to the server's private VNet address. TCP and UDP throughput
+are measured with iperf3 against the server's WireGuard address, and the test
+fails unless the route uses the `wg0` interface.
 
 ## Deploy and test
 
@@ -31,7 +31,9 @@ Defaults:
 
 The deployment script creates the resource group, deploys both VMs, exchanges
 their WireGuard public keys, configures the server and client, verifies the
-tunnel, and runs a 30-second four-stream iperf3 test.
+tunnel, and runs 30-second TCP and UDP iperf3 tests. TCP uses four parallel
+streams. UDP targets 2 Gbit/s and reports received throughput, packet loss, and
+jitter.
 
 Run the throughput test again with:
 
@@ -39,5 +41,19 @@ Run the throughput test again with:
 .\test-throughput.ps1 `
   -ResourceGroupName sabansal-wireguard-rg `
   -ParallelConnections 4 `
+  -UdpTargetMbps 2000 `
   -DurationSeconds 30
 ```
+
+Benchmark the direct VNet path instead of the WireGuard tunnel:
+
+```powershell
+.\test-throughput.ps1 `
+  -ResourceGroupName sabansal-wireguard-rg `
+  -Path Direct `
+  -ParallelConnections 4 `
+  -UdpTargetMbps 2000 `
+  -DurationSeconds 30
+```
+
+Direct mode targets `10.70.0.4` and fails if the selected route uses `wg0`.
