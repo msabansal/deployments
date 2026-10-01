@@ -94,6 +94,7 @@ if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewa
   firewall-cmd --permanent --add-port=5201/tcp
   firewall-cmd --permanent --add-port=5201/udp
   firewall-cmd --permanent --add-port=4433/udp
+  firewall-cmd --permanent --add-port=4434/tcp
   firewall-cmd --reload
 fi
 
