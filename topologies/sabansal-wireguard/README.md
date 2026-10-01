@@ -41,8 +41,8 @@ checksum-verified iperf3 build with UDP GSO/GRO support. UDP uses kernel/NIC
 segmentation and receive offload with MTU-safe 1,380-byte datagrams instead of
 independent CPU-bound userspace generators. It uses at most one GSO-enabled
 iperf3 thread per vCPU and divides the aggregate target across those threads.
-UDP reports received throughput, packet loss, jitter, and whole-VM vCPU
-utilization. The build also applies the
+The benchmark reports received throughput and whole-VM client CPU utilization
+for both protocols, plus UDP packet loss and jitter. The build also applies the
 upstream iperf3 GRO receive-loop CPU fix from commit
 `ee73f1740f689cafde3cde13d711eecbac985090`.
 

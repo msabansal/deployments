@@ -131,7 +131,13 @@ fi
 ping -c 3 -W 3 "$TARGET" >/dev/null
 TCP_REPORT=/tmp/wireguard-iperf-tcp.json
 UDP_REPORT=/tmp/wireguard-iperf-udp.json
+read -r _ tcp_cpu_user tcp_cpu_nice tcp_cpu_system tcp_cpu_idle tcp_cpu_iowait tcp_cpu_irq tcp_cpu_softirq tcp_cpu_steal _ </proc/stat
+TCP_CPU_TOTAL_BEFORE=$((tcp_cpu_user + tcp_cpu_nice + tcp_cpu_system + tcp_cpu_idle + tcp_cpu_iowait + tcp_cpu_irq + tcp_cpu_softirq + tcp_cpu_steal))
+TCP_CPU_IDLE_BEFORE=$((tcp_cpu_idle + tcp_cpu_iowait))
 "$IPERF" -c "$TARGET" -p 5201 -P __STREAMS__ -w 4M -Z -t __DURATION__ --json >"$TCP_REPORT"
+read -r _ tcp_cpu_user tcp_cpu_nice tcp_cpu_system tcp_cpu_idle tcp_cpu_iowait tcp_cpu_irq tcp_cpu_softirq tcp_cpu_steal _ </proc/stat
+TCP_CPU_TOTAL_AFTER=$((tcp_cpu_user + tcp_cpu_nice + tcp_cpu_system + tcp_cpu_idle + tcp_cpu_iowait + tcp_cpu_irq + tcp_cpu_softirq + tcp_cpu_steal))
+TCP_CPU_IDLE_AFTER=$((tcp_cpu_idle + tcp_cpu_iowait))
 
 UDP_TARGET_MBPS=__UDP_RATE__
 if [ "$UDP_TARGET_MBPS" -eq 0 ]; then
@@ -173,7 +179,8 @@ CPU_TOTAL_AFTER=$((cpu_user + cpu_nice + cpu_system + cpu_idle + cpu_iowait + cp
 CPU_IDLE_AFTER=$((cpu_idle + cpu_iowait))
 
 python3 - "$TCP_REPORT" "$UDP_REPORT" "$ROUTE" "$UDP_EFFECTIVE_TARGET_MBPS" "$UDP_STREAMS" "$VCPU_COUNT" \
-  "$CPU_TOTAL_BEFORE" "$CPU_IDLE_BEFORE" "$CPU_TOTAL_AFTER" "$CPU_IDLE_AFTER" <<'PYEOF'
+  "$CPU_TOTAL_BEFORE" "$CPU_IDLE_BEFORE" "$CPU_TOTAL_AFTER" "$CPU_IDLE_AFTER" \
+  "$TCP_CPU_TOTAL_BEFORE" "$TCP_CPU_IDLE_BEFORE" "$TCP_CPU_TOTAL_AFTER" "$TCP_CPU_IDLE_AFTER" <<'PYEOF'
 import json
 import sys
 
@@ -189,6 +196,7 @@ if udp_report.get("error"):
 
 tcp_sent = tcp_report["end"]["sum_sent"]
 tcp_received = tcp_report["end"]["sum_received"]
+tcp_cpu = tcp_report["end"].get("cpu_utilization_percent", {})
 udp_end = udp_report["end"]
 udp_sent = udp_end.get("sum_sent") or udp_end["sum"]
 udp_received = udp_end.get("sum_received") or udp_end["sum"]
@@ -198,6 +206,9 @@ vcpu_count = int(sys.argv[6])
 cpu_total_delta = int(sys.argv[9]) - int(sys.argv[7])
 cpu_idle_delta = int(sys.argv[10]) - int(sys.argv[8])
 client_vm_cpu = 100.0 * (cpu_total_delta - cpu_idle_delta) / cpu_total_delta
+tcp_cpu_total_delta = int(sys.argv[13]) - int(sys.argv[11])
+tcp_cpu_idle_delta = int(sys.argv[14]) - int(sys.argv[12])
+tcp_client_vm_cpu = 100.0 * (tcp_cpu_total_delta - tcp_cpu_idle_delta) / tcp_cpu_total_delta
 
 print(json.dumps({
     "route": sys.argv[3],
@@ -206,6 +217,9 @@ print(json.dumps({
         "bits_per_second_sent": tcp_sent["bits_per_second"],
         "bits_per_second_received": tcp_received["bits_per_second"],
         "retransmits": tcp_sent.get("retransmits", 0),
+        "client_cpu_percent": tcp_cpu.get("host_total", 0) / vcpu_count,
+        "server_cpu_percent": tcp_cpu.get("remote_total", 0) / vcpu_count,
+        "client_vm_cpu_percent": tcp_client_vm_cpu,
     },
     "udp": {
         "target_mbps": int(sys.argv[4]),
@@ -253,6 +267,9 @@ PYEOF
   Write-Host ("    sent        : {0:N2} Gbits/sec" -f ($result.tcp.bits_per_second_sent / 1e9)) -ForegroundColor Green
   Write-Host ("    received    : {0:N2} Gbits/sec" -f ($result.tcp.bits_per_second_received / 1e9)) -ForegroundColor Green
   Write-Host ("    retransmits : {0:N0}" -f $result.tcp.retransmits)
+  Write-Host ("    client VM CPU    : {0:N1}%" -f $result.tcp.client_vm_cpu_percent)
+  Write-Host ("    client iperf CPU : {0:N1}%" -f $result.tcp.client_cpu_percent)
+  Write-Host ("    server iperf CPU : {0:N1}%" -f $result.tcp.server_cpu_percent)
   Write-Host ''
   Write-Host ("  UDP (target {0:N0} Mbits/sec, {1})" -f $result.udp.target_mbps, $result.udp.offload)
   Write-Host ("    streams     : {0:N0}" -f $result.udp.streams)
