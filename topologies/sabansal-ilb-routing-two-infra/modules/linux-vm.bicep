@@ -20,12 +20,6 @@ param vmSize string = 'Standard_D2als_v7'
 @description('Static primary private IP address.')
 param primaryPrivateIpAddress string
 
-@description('Optional static secondary private IP address.')
-param secondaryPrivateIpAddress string = ''
-
-@description('Optional routing backend IP configured only in its owning router guest.')
-param sharedBackendIpAddress string = ''
-
 @description('Enable Azure NIC IP forwarding and guest forwarding.')
 param isRouter bool = false
 
@@ -34,7 +28,6 @@ var configureScript = '''
 set -euo pipefail
 
 ROLE=__ROLE__
-SHARED_BACKEND_IP=__SHARED_BACKEND_IP__
 
 if command -v tdnf >/dev/null 2>&1; then
   PKG=tdnf
@@ -106,43 +99,6 @@ sysctl --system >/dev/null
 ethtool -K eth0 gro on gso on tso on 2>/dev/null || true
 ethtool -K eth0 rx-udp-gro-forwarding on 2>/dev/null || true
 
-if [ "$ROLE" = "router" ] && [ -n "$SHARED_BACKEND_IP" ]; then
-  systemctl disable --now sync-azure-secondary-ips.service 2>/dev/null || true
-  rm -f /etc/systemd/system/sync-azure-secondary-ips.service
-  rm -f /usr/local/sbin/sync-azure-secondary-ips
-
-  cat >/usr/local/sbin/configure-shared-backend-ip <<'EOF'
-#!/bin/bash
-set -euo pipefail
-
-address="$1"
-if ! ip -4 -o address show dev eth0 | awk '{ print $4 }' | grep -qx "$address/32"; then
-  ip address add "$address/32" dev eth0
-fi
-EOF
-  chmod 0755 /usr/local/sbin/configure-shared-backend-ip
-
-  cat >/etc/systemd/system/configure-shared-backend-ip.service <<EOF
-[Unit]
-Description=Configure shared load balancer backend IP
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/configure-shared-backend-ip $SHARED_BACKEND_IP
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload
-  systemctl disable --now configure-secondary-ip.service 2>/dev/null || true
-  rm -f /etc/systemd/system/configure-secondary-ip.service
-  systemctl enable configure-shared-backend-ip.service
-  systemctl restart configure-shared-backend-ip.service
-fi
-
 if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
   ZONE=$(firewall-cmd --get-default-zone)
   firewall-cmd --permanent --zone="$ZONE" --add-port=5201/tcp
@@ -172,11 +128,7 @@ fi
 echo TOPOLOGY_VM_CONFIGURED
 '''
 
-var script = replace(
-  replace(configureScript, '__ROLE__', isRouter ? 'router' : 'endpoint'),
-  '__SHARED_BACKEND_IP__',
-  sharedBackendIpAddress
-)
+var script = replace(configureScript, '__ROLE__', isRouter ? 'router' : 'endpoint')
 
 resource publicIp 'Microsoft.Network/publicIPAddresses@2024-05-01' = {
   name: '${vmName}-pip'
@@ -196,7 +148,7 @@ resource networkInterface 'Microsoft.Network/networkInterfaces@2024-05-01' = {
   properties: {
     enableAcceleratedNetworking: true
     enableIPForwarding: isRouter
-    ipConfigurations: concat([
+    ipConfigurations: [
       {
         name: 'primary'
         properties: {
@@ -211,19 +163,7 @@ resource networkInterface 'Microsoft.Network/networkInterfaces@2024-05-01' = {
           }
         }
       }
-    ], empty(secondaryPrivateIpAddress) ? [] : [
-      {
-        name: 'secondary'
-        properties: {
-          primary: false
-          privateIPAllocationMethod: 'Static'
-          privateIPAddress: secondaryPrivateIpAddress
-          subnet: {
-            id: subnetId
-          }
-        }
-      }
-    ])
+    ]
   }
 }
 
@@ -299,5 +239,4 @@ resource configure 'Microsoft.Compute/virtualMachines/runCommands@2024-07-01' = 
 output vmName string = vm.name
 output nicName string = networkInterface.name
 output primaryPrivateIpAddress string = primaryPrivateIpAddress
-output secondaryPrivateIpAddress string = secondaryPrivateIpAddress
 output publicIpAddress string = publicIp.properties.ipAddress

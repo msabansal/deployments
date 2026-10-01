@@ -20,11 +20,15 @@ param vnetAddressPrefix string = '10.80.0.0/16'
 param routerSubnetPrefix string = '10.80.0.0/24'
 param vm1SubnetPrefix string = '10.80.1.0/24'
 param vm2SubnetPrefix string = '10.80.2.0/24'
+param ilbSubnetPrefix string = '10.80.3.0/24'
+param infraVnetAddressPrefix string = '10.30.0.0/16'
+param infraSubnetPrefix string = '10.30.0.0/24'
 
-param ilbFrontendIp string = '10.80.0.10'
-param router1PrimaryIp string = '10.80.0.4'
+param ilbFrontendIp string = '10.80.3.10'
+param router1PrimaryIp string = '10.30.0.4'
 param router1SecondaryIp string = '10.80.0.5'
-param router2PrimaryIp string = '10.80.0.6'
+param router2PrimaryIp string = '10.30.0.5'
+param router2SwiftIp string = '10.80.0.6'
 param vm1PrivateIp string = '10.80.1.4'
 param vm2PrivateIp string = '10.80.2.4'
 
@@ -121,6 +125,29 @@ resource routerNsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
   }
 }
 
+resource infraVnet 'Microsoft.Network/virtualNetworks@2024-05-01' = {
+  name: '${namePrefix}-infra-vnet'
+  location: location
+  properties: {
+    addressSpace: {
+      addressPrefixes: [
+        infraVnetAddressPrefix
+      ]
+    }
+    subnets: [
+      {
+        name: 'infra'
+        properties: {
+          addressPrefix: infraSubnetPrefix
+          networkSecurityGroup: {
+            id: routerNsg.id
+          }
+        }
+      }
+    ]
+  }
+}
+
 resource vm1RouteTable 'Microsoft.Network/routeTables@2024-05-01' = {
   name: '${vm1Name}-rt'
   location: location
@@ -200,6 +227,15 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-05-01' = {
           }
         }
       }
+      {
+        name: 'ilb'
+        properties: {
+          addressPrefix: ilbSubnetPrefix
+          networkSecurityGroup: {
+            id: routerNsg.id
+          }
+        }
+      }
     ]
   }
 }
@@ -218,7 +254,7 @@ resource loadBalancer 'Microsoft.Network/loadBalancers@2024-05-01' = {
           privateIPAddress: ilbFrontendIp
           privateIPAllocationMethod: 'Static'
           subnet: {
-            id: vnet.properties.subnets[0].id
+            id: vnet.properties.subnets[3].id
           }
         }
       }
@@ -315,13 +351,11 @@ module router1 'modules/linux-vm.bicep' = {
   params: {
     location: location
     vmName: router1Name
-    subnetId: vnet.properties.subnets[0].id
+    subnetId: infraVnet.properties.subnets[0].id
     adminUsername: adminUsername
     adminPublicKey: adminPublicKey
     vmSize: vmSize
     primaryPrivateIpAddress: router1PrimaryIp
-    secondaryPrivateIpAddress: router1SecondaryIp
-    sharedBackendIpAddress: router1SecondaryIp
     isRouter: true
   }
 }
@@ -331,7 +365,7 @@ module router2 'modules/linux-vm.bicep' = {
   params: {
     location: location
     vmName: router2Name
-    subnetId: vnet.properties.subnets[0].id
+    subnetId: infraVnet.properties.subnets[0].id
     adminUsername: adminUsername
     adminPublicKey: adminPublicKey
     vmSize: vmSize
@@ -346,6 +380,17 @@ output loadBalancerFrontendIp string = ilbFrontendIp
 output backendPoolName string = backendPoolName
 output backendPoolIp string = router1SecondaryIp
 output virtualNetworkName string = vnet.name
+output infraVnetId string = infraVnet.id
+output customerVnetId string = vnet.id
+output customerVnetGuid string = vnet.properties.resourceGuid
+output routingSubnetId string = vnet.properties.subnets[0].id
+output routingSubnetName string = 'router'
+output routingBackendIp string = router1SecondaryIp
+output routerNamespaceName string = 'swift-ilb-router1'
+output routingVlanId int = 1
+output router2SwiftIp string = router2SwiftIp
+output router2NamespaceName string = 'swift-ilb-router2'
+output router2VlanId int = 1
 output vm1Name string = vm1.outputs.vmName
 output vm1NicName string = vm1.outputs.nicName
 output vm1PrivateIp string = vm1PrivateIp
@@ -356,8 +401,10 @@ output vm2PrivateIp string = vm2PrivateIp
 output vm2SubnetPrefix string = vm2SubnetPrefix
 output router1Name string = router1.outputs.vmName
 output router1NicName string = router1.outputs.nicName
+output router1PublicIp string = router1.outputs.publicIpAddress
 output router1PrimaryIp string = router1PrimaryIp
 output router1SecondaryIp string = router1SecondaryIp
 output router2Name string = router2.outputs.vmName
 output router2NicName string = router2.outputs.nicName
+output router2PublicIp string = router2.outputs.publicIpAddress
 output router2PrimaryIp string = router2PrimaryIp
