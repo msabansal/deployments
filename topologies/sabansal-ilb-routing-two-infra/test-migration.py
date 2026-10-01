@@ -52,14 +52,15 @@ class Experiment:
 
     def ssh(self, host):
         return ["ssh", "-T", "-i", self.key, "-o", "BatchMode=yes",
-                "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10",
+                "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=5",
                 "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
                 f"azureuser@{host}"]
 
     def command(self, host, command, **kwargs):
+        kwargs.setdefault("timeout", 15)
         try:
             return checked(self.ssh(host) + [command], **kwargs)
-        except RuntimeError as error:
+        except (RuntimeError, subprocess.TimeoutExpired) as error:
             raise RuntimeError(self.redact(str(error))) from None
 
     def install(self, host, source, destination):
@@ -98,7 +99,7 @@ class Experiment:
                 if candidate.transport_error:
                     raise RuntimeError(self.redact(candidate.transport_error))
 
-    def run(self, host, name, command, timeout=600):
+    def run(self, host, name, command, timeout=90):
         job = self.prepare(host, name, command)
         job.start()
         self.wait(lambda: job.exit_code is not None, timeout, name)
@@ -191,9 +192,9 @@ test "$trigger" = GO
 context=""
 if test -e /sys/fs/selinux/enforce; then context=$(sudo id -Z); fi
 if test -n "$context"; then
-  sudo systemd-run --quiet --unit '{self.unit}' --property="SELinuxContext=$context" /bin/bash '{self.script}'
+  sudo systemd-run --quiet --unit '{self.unit}' --property=TimeoutStopSec=5s --property="SELinuxContext=$context" /bin/bash '{self.script}'
 else
-  sudo systemd-run --quiet --unit '{self.unit}' /bin/bash '{self.script}'
+  sudo systemd-run --quiet --unit '{self.unit}' --property=TimeoutStopSec=5s /bin/bash '{self.script}'
 fi
 """
         self.connect(launch + self.monitor())
@@ -332,11 +333,23 @@ def managed_attachment(experiment, host, namespace):
     return json.loads(experiment.command(host, "sudo python3 -c " + shlex.quote(script)))
 
 
+def require_no_legacy_attachment(experiment):
+    status = experiment.command(
+        DESTINATION,
+        "if sudo test -f /var/lib/swift-ilb/swift-ilb-router2.json || "
+        "sudo ip netns list | grep -q '^swift-ilb-router2\\( \\|$\\)'; "
+        "then echo present; else echo absent; fi").strip()
+    if status != "absent":
+        raise RuntimeError("Remove the legacy .6 attachment before running the single-IP experiment")
+
+
 def main():
     global SOURCE, DESTINATION, CLIENT, SERVER
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--key", default=str(pathlib.Path.home() / ".ssh" / "id_ed25519"))
     parser.add_argument("--duration", type=int, default=120)
+    parser.add_argument("--completion-grace", type=int, default=5,
+                        help="Additional seconds before forcibly ending an iperf client (default: 5)")
     parser.add_argument("--protocol", choices=("udp", "tcp"), default="udp")
     parser.add_argument("--migrate-after", type=int, default=30)
     parser.add_argument("--output-directory")
@@ -347,6 +360,8 @@ def main():
     args = parser.parse_args()
     if not 5 <= args.migrate_after < args.duration - 10:
         parser.error("Migration must occur at least five seconds into the run and ten seconds before its end")
+    if not 0 <= args.completion_grace <= 30:
+        parser.error("Completion grace must be 0-30 seconds")
     experiment = Experiment(args.key)
     outputs = json.loads(checked(["az", "deployment", "group", "show", "-g", GROUP,
                                   "-n", DEPLOYMENT, "--query", "properties.outputs", "-o", "json"]))
@@ -361,6 +376,7 @@ def main():
                               "backendAddressPools[].loadBalancerBackendAddresses[].ipAddress", "-o", "json"]))
     if pool != ["10.80.0.5"]:
         raise RuntimeError("Expected the sole ILB backend 10.80.0.5")
+    require_no_legacy_attachment(experiment)
     delegation_text = checked(["dotnet", "run", "--project", args.delegator_project, "--",
                                "--key-vault-name", "testGWMSS", "--certificate-name", "prodnextappCert",
                                "--app-id", "f6f9bf50-8786-4efb-a1c6-776f770b4b65",
@@ -383,18 +399,17 @@ def main():
     success = False
     onboard = None
     try:
-        print("Restoring baseline: backend on router1; router2 retains 10.80.0.6.", flush=True)
+        print("Restoring baseline: sole backend .5 on router1; router2 has no other attachment.", flush=True)
         experiment.run(DESTINATION, "baseline backend release",
                        attachment(outputs, token, "cleanup", DESTINATION_NS, 2))
         experiment.run(SOURCE, "baseline backend attach",
                        attachment(outputs, token, "create", SOURCE_NS, 1))
-        before_destination_other = forwarded(experiment, DESTINATION, "swift-ilb-router2")
-        args.before_other_nc = managed_attachment(experiment, DESTINATION, "swift-ilb-router2")["ncId"]
+        before_destination_root = forwarded(experiment, DESTINATION)
         release = experiment.prepare(SOURCE, "source release",
                                      attachment(outputs, token, "cleanup", SOURCE_NS, 1))
         onboard = experiment.prepare(DESTINATION, "destination onboarding",
                                      attachment(outputs, token, "create", DESTINATION_NS, 2))
-        result = run_measurement(experiment, release, onboard, args, before_destination_other)
+        result = run_measurement(experiment, release, onboard, args, before_destination_root)
         final_pool = json.loads(checked(["az", "network", "lb", "show", "-g", GROUP,
                                          "-n", outputs["loadBalancerName"]["value"], "--query",
                                          "backendAddressPools[].loadBalancerBackendAddresses[].ipAddress",
@@ -449,7 +464,7 @@ def main():
             raise RuntimeError("Migration cleanup failed: " + "; ".join(errors))
 
 
-def run_measurement(experiment, release, onboard, args, before_other):
+def run_measurement(experiment, release, onboard, args, before_destination_root):
     output = pathlib.Path(args.output_directory or tempfile.mkdtemp(prefix="swift-ilb-migration-"))
     output.mkdir(parents=True, exist_ok=True)
     identifier = uuid.uuid4().hex
@@ -460,12 +475,9 @@ def run_measurement(experiment, release, onboard, args, before_other):
         experiment.bridge_control()
     throughput_server = experiment.prepare(
         SERVER, "throughput server",
-        f"timeout {args.duration + 240} /usr/local/bin/iperf3 -s -p 5203 -1 "
-        f"--server-max-duration {args.duration + 60} --json")
-    throughput_server.start()
-    experiment.command(SERVER, "for attempt in $(seq 1 20); do "
-                       "if sudo ss -ltn 'sport = :5203' | grep -q LISTEN; then exit 0; fi; "
-                       "sleep 0.1; done; echo 'Throughput listener failed to start' >&2; exit 1")
+        f"timeout --kill-after=2 {args.duration + args.completion_grace + 10} "
+        f"/usr/local/bin/iperf3 -s -p 5203 -1 "
+        f"--server-max-duration {args.duration + args.completion_grace + 5} --json")
     server = experiment.prepare(SERVER, "echo server",
                                 f"timeout {args.duration + 240} python3 /usr/local/sbin/swift-ilb-migration-probe.py "
                                 "server --bind 0.0.0.0 --port 5202")
@@ -475,7 +487,7 @@ def run_measurement(experiment, release, onboard, args, before_other):
                        "sleep 0.1; done; echo 'Echo listener failed to start' >&2; exit 1")
     experiment.run(CLIENT, "baseline UDP readiness", """python3 - <<'PY'
 import json, subprocess, time
-deadline = time.monotonic() + 120
+deadline = time.monotonic() + 30
 while time.monotonic() < deadline:
     attempt = subprocess.run([
         "python3", "/usr/local/sbin/swift-ilb-migration-probe.py", "client",
@@ -493,8 +505,8 @@ while time.monotonic() < deadline:
         break
     print("Waiting for baseline UDP dataplane convergence", flush=True)
 else:
-    raise RuntimeError("Baseline UDP dataplane did not converge within 120 seconds")
-PY""", timeout=150)
+    raise RuntimeError("Baseline UDP dataplane did not converge within 30 seconds")
+PY""", timeout=40)
     probe = experiment.prepare(CLIENT, "connectivity probe",
                                "python3 /usr/local/sbin/swift-ilb-migration-probe.py client "
                                f"--target 10.80.2.4 --port 5202 --duration {args.duration + 10} "
@@ -504,7 +516,8 @@ PY""", timeout=150)
     load = experiment.prepare(CLIENT, "120-second throughput",
                               "set -euo pipefail\n"
                               "echo __LOAD_STARTED__\n"
-                              f"timeout {args.duration + 60} /usr/local/bin/iperf3 -c 10.80.2.4 "
+                              f"timeout --kill-after=2 {args.duration + args.completion_grace} "
+                              f"/usr/local/bin/iperf3 -c 10.80.2.4 --connect-timeout 3000 "
                               f"-p 5203 {traffic_options} -t {args.duration} --json")
     timings = {}
     probe_ready = []
@@ -529,6 +542,10 @@ PY""", timeout=150)
     try:
         probe.start()
         experiment.wait(lambda: len(probe_ready) >= 2, 20, "initial echo connectivity", observe)
+        throughput_server.start()
+        experiment.command(SERVER, "for attempt in $(seq 1 20); do "
+                           "if sudo ss -ltn 'sport = :5203' | grep -q LISTEN; then exit 0; fi; "
+                           "sleep 0.1; done; echo 'Throughput listener failed to start' >&2; exit 1")
         load.start()
         experiment.wait(lambda: "load_started" in timings, 20, "throughput startup", observe)
         migrate_at = timings["load_started"] + args.migrate_after
@@ -544,7 +561,9 @@ PY""", timeout=150)
             raise RuntimeError("Source CLI did not emit the validated deletion acknowledgement")
         experiment.wait(lambda: all(job.exit_code is not None
                                     for job in (release, onboard, load, probe, throughput_server)),
-                        args.duration + 120, "migration, throughput, and probes", observe)
+                        max(0, timings["load_started"] + args.duration + args.completion_grace + 20
+                            - time.perf_counter()),
+                        "migration, throughput, and probes", observe)
         (output / "controller-timings.json").write_text(json.dumps(timings, indent=2))
         (output / "iperf-output.log").write_text("\n".join(load.lines))
         (output / "iperf-server-output.log").write_text("\n".join(throughput_server.lines))
@@ -572,14 +591,16 @@ PY""", timeout=150)
         sent_seconds = throughput["end"]["sum_sent"]["seconds"]
         if abs(sent_seconds - args.duration) > 1:
             raise RuntimeError(f"Requested {args.duration} seconds, but sender ran {sent_seconds}")
-        after_other = forwarded(experiment, DESTINATION, "swift-ilb-router2")
+        after_destination_root = forwarded(experiment, DESTINATION)
         after_source = forwarded(experiment, SOURCE)
         destination_forwarded = forwarded(experiment, DESTINATION, DESTINATION_NS)
-        isolation_passed = (after_other == before_other and after_source == before_source
+        isolation_passed = (after_destination_root == before_destination_root
+                            and after_source == before_source
                             and destination_forwarded > 0)
         if not isolation_passed:
-            print(f"Routing concern: inactive 10.80.0.6 namespace forwarded {after_other - before_other} "
-                  f"datagrams; source root forwarded {after_source - before_source}; "
+            print(f"Routing concern: destination root forwarded "
+                  f"{after_destination_root - before_destination_root} datagrams; "
+                  f"source root forwarded {after_source - before_source}; "
                   f"migrated namespace forwarded {destination_forwarded}. "
                   "The measurement completed but exclusive-routing validation failed.", flush=True)
         source_ncs = experiment.command(SOURCE, "sudo /usr/local/bin/swiftcmd get-all-ncs")
@@ -587,16 +608,14 @@ PY""", timeout=150)
         if source_report.get("networkContainers") or source_report.get("NetworkContainers"):
             raise RuntimeError("Source NC still exists after migration")
         backend = managed_attachment(experiment, DESTINATION, DESTINATION_NS)
-        retained = managed_attachment(experiment, DESTINATION, "swift-ilb-router2")
         if (backend["ip"], backend["vlan"]) != ("10.80.0.5", 2):
             raise RuntimeError("Migrated backend state differs")
-        if (retained["ncId"], retained["ip"], retained["vlan"]) != (args.before_other_nc, "10.80.0.6", 1):
-            raise RuntimeError("Original router2 attachment changed")
+        require_no_legacy_attachment(experiment)
         destination_ncs = experiment.command(DESTINATION, "sudo /usr/local/bin/swiftcmd get-all-ncs")
         destination_report, _ = json.JSONDecoder().raw_decode(destination_ncs[destination_ncs.index("{"):])
         entries = destination_report.get("networkContainers") or destination_report.get("NetworkContainers") or []
         nc_ids = {entry.get("networkContainerId") or entry.get("NetworkContainerId") for entry in entries}
-        if nc_ids != {backend["ncId"], retained["ncId"]}:
+        if nc_ids != {backend["ncId"]}:
             raise RuntimeError("Unexpected destination network containers")
         summary = {
             "duration_s": args.duration,
@@ -607,7 +626,6 @@ PY""", timeout=150)
             "destination": DESTINATION,
             "backend_ip": "10.80.0.5",
             "backend_nc_id": backend["ncId"],
-            "retained_nc_id": retained["ncId"],
             "source_release_observed_at_s": timings["release_observed"] - timings["load_started"],
             "ack_observation_to_destination_trigger_ms":
                 1000 * (timings["destination_triggered"] - timings["release_observed"]),
@@ -622,9 +640,7 @@ PY""", timeout=150)
             "received_seconds": throughput["end"]["sum_received"]["seconds"],
             "received_gbps": throughput["end"]["sum_received"]["bits_per_second"] / 1e9,
             "destination_forwarded": destination_forwarded,
-            "inactive_attachment_forwarded": after_other - before_other,
-            "inactive_attachment_forwarded_before": before_other,
-            "inactive_attachment_forwarded_after": after_other,
+            "destination_host_forwarded_during_test": after_destination_root - before_destination_root,
             "source_host_forwarded_during_test": after_source - before_source,
             "forwarding_isolation_passed": isolation_passed,
             "probe_sampling_complete": probe.exit_code == 0,

@@ -26,9 +26,16 @@ param infraSubnetPrefix string = '10.30.0.0/24'
 
 param ilbFrontendIp string = '10.80.3.10'
 param router1PrimaryIp string = '10.30.0.4'
-param router1SecondaryIp string = '10.80.0.5'
+@allowed([
+  '10.80.0.5'
+])
+param routingBackendIp string = '10.80.0.5'
+@allowed([
+  'router1'
+  'router2'
+])
+param backendRouter string = 'router2'
 param router2PrimaryIp string = '10.30.0.5'
-param router2SwiftIp string = '10.80.0.6'
 param vm1PrivateIp string = '10.80.1.4'
 param vm2PrivateIp string = '10.80.2.4'
 
@@ -40,6 +47,8 @@ var loadBalancerName = '${namePrefix}-ilb'
 var backendPoolName = 'router-backend'
 var frontendName = 'frontend'
 var probeName = 'ssh-health'
+var backendNamespace = backendRouter == 'router1' ? 'swift-ilb-router1' : 'swift-ilb-backend2'
+var backendVlan = backendRouter == 'router1' ? 1 : 2
 
 var inboundRules = [
   {
@@ -313,7 +322,7 @@ resource backendPool 'Microsoft.Network/loadBalancers/backendAddressPools@2024-0
           virtualNetwork: {
             id: vnet.id
           }
-          ipAddress: router1SecondaryIp
+          ipAddress: routingBackendIp
         }
       }
     ]
@@ -378,19 +387,17 @@ output operatingSystem string = 'Azure Linux 4'
 output loadBalancerName string = loadBalancer.name
 output loadBalancerFrontendIp string = ilbFrontendIp
 output backendPoolName string = backendPoolName
-output backendPoolIp string = router1SecondaryIp
+output backendPoolIp string = routingBackendIp
 output virtualNetworkName string = vnet.name
 output infraVnetId string = infraVnet.id
 output customerVnetId string = vnet.id
 output customerVnetGuid string = vnet.properties.resourceGuid
 output routingSubnetId string = vnet.properties.subnets[0].id
 output routingSubnetName string = 'router'
-output routingBackendIp string = router1SecondaryIp
-output routerNamespaceName string = 'swift-ilb-router1'
-output routingVlanId int = 1
-output router2SwiftIp string = router2SwiftIp
-output router2NamespaceName string = 'swift-ilb-router2'
-output router2VlanId int = 1
+output routingBackendIp string = routingBackendIp
+output backendRouter string = backendRouter
+output routerNamespaceName string = backendNamespace
+output routingVlanId int = backendVlan
 output vm1Name string = vm1.outputs.vmName
 output vm1NicName string = vm1.outputs.nicName
 output vm1PrivateIp string = vm1PrivateIp
@@ -403,7 +410,7 @@ output router1Name string = router1.outputs.vmName
 output router1NicName string = router1.outputs.nicName
 output router1PublicIp string = router1.outputs.publicIpAddress
 output router1PrimaryIp string = router1PrimaryIp
-output router1SecondaryIp string = router1SecondaryIp
+output router1SecondaryIp string = routingBackendIp
 output router2Name string = router2.outputs.vmName
 output router2NicName string = router2.outputs.nicName
 output router2PublicIp string = router2.outputs.publicIpAddress

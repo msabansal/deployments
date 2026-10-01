@@ -4,6 +4,14 @@ param(
 
   [string] $DeploymentName = 'sabansal-ilb-routing-two-infra',
 
+  [ValidateSet('router1', 'router2')]
+  [string] $BackendRouter = 'router2',
+
+  [switch] $ConnectivityOnly,
+
+  [ValidateRange(1, 30)]
+  [int] $ConnectivityTimeoutSeconds = 5,
+
   [ValidateRange(1, 100000)]
   [int] $UdpTargetMbps = 5000,
 
@@ -38,7 +46,8 @@ function Invoke-VmShellScript {
   param(
     [Parameter(Mandatory)] [string] $VmName,
     [Parameter(Mandatory)] [string] $Script,
-    [string] $Operation = 'guest script'
+    [string] $Operation = 'guest script',
+    [ValidateRange(5, 900)] [int] $TimeoutSeconds = 30
   )
 
   $scriptFile = Join-Path ([System.IO.Path]::GetTempPath()) ("ilb-routing-test-{0}.sh" -f [guid]::NewGuid())
@@ -46,7 +55,7 @@ function Invoke-VmShellScript {
   $exitMarker = "ILB_GUEST_EXIT_$([guid]::NewGuid().ToString('N'))"
   $delimiter = "ILB_SCRIPT_$([guid]::NewGuid().ToString('N'))"
   $wrappedScript = @"
-/bin/bash -s <<'$delimiter'
+timeout --signal=TERM --kill-after=5s ${TimeoutSeconds}s /bin/bash -s <<'$delimiter'
 $Script
 $delimiter
 guest_exit=`$?
@@ -150,9 +159,8 @@ $cliStderr
 function Get-ForwardedDatagrams {
   param(
     [Parameter(Mandatory)] [string] $VmName,
-    [Parameter(Mandatory)]
-    [ValidateSet('swift-ilb-router1', 'swift-ilb-router2')]
-    [string] $NamespaceName
+    [ValidateSet('', 'swift-ilb-router1', 'swift-ilb-backend2')]
+    [string] $NamespaceName = ''
   )
 
   $counterScript = @'
@@ -165,8 +173,9 @@ __NAMESPACE_PREFIX__awk '$1 == "Ip:" {
   }
 }' /proc/net/snmp
 '@
-  $prefix = "ip netns exec $NamespaceName "
-  $result = Invoke-VmShellScript -VmName $VmName -Operation "ForwDatagrams in $NamespaceName" `
+  $prefix = if ($NamespaceName) { "ip netns exec $NamespaceName " } else { '' }
+  $context = if ($NamespaceName) { $NamespaceName } else { 'inactive host root' }
+  $result = Invoke-VmShellScript -VmName $VmName -Operation "ForwDatagrams in $context" -TimeoutSeconds 15 `
     -Script ($counterScript.Replace('__NAMESPACE_PREFIX__', $prefix))
 
   [long] $counter = 0
@@ -181,11 +190,10 @@ function Assert-RouterGuestLayout {
     [Parameter(Mandatory)] [string] $VmName,
     [Parameter(Mandatory)] [string] $PrimaryIp,
     [Parameter(Mandatory)]
-    [ValidateSet('swift-ilb-router1', 'swift-ilb-router2')]
+    [ValidateSet('swift-ilb-router1', 'swift-ilb-backend2')]
     [string] $NamespaceName,
-    [Parameter(Mandatory)]
-    [ValidateSet('10.80.0.5', '10.80.0.6')]
-    [string] $SwiftIp
+    [Parameter(Mandatory)] [ValidateSet(1, 2)] [int] $VlanId,
+    [bool] $Active = $true
   )
 
   $guestScript = @'
@@ -195,7 +203,7 @@ import json
 import subprocess
 
 def ip_json(*args):
-    return json.loads(subprocess.check_output(["ip", "-j", *args], text=True))
+    return json.loads(subprocess.check_output(["ip", "-j", *args], text=True, timeout=10))
 
 namespace = "__NAMESPACE__"
 root = ip_json("-4", "addr", "show")
@@ -207,12 +215,28 @@ result = {
     "namespaceAddresses": [],
     "namespaceLinks": [],
     "forwarding": None,
+    "customerIps": [],
 }
+for entry in result["namespaces"]:
+    links = ip_json("-n", entry, "-4", "addr", "show")
+    result["customerIps"] += [
+        {"namespace": entry, "ip": address["local"]}
+        for link in links for address in link.get("addr_info", [])
+        if address["local"].startswith("10.80.")
+    ]
+raw = subprocess.check_output(["/usr/local/bin/swiftcmd", "get-all-ncs"], text=True, timeout=15)
+report = json.loads(raw[raw.index("{"):])
+entries = report.get("networkContainers", report.get("NetworkContainers"))
+if entries is None and ("networkContainers" in report or "NetworkContainers" in report):
+    entries = []
+if not isinstance(entries, list):
+    raise RuntimeError("Unrecognized SWIFT NC inventory")
+result["ncIds"] = [entry.get("networkContainerId") or entry["NetworkContainerId"] for entry in entries]
 if namespace in result["namespaces"]:
     result["namespaceAddresses"] = ip_json("-n", namespace, "-4", "addr", "show", "dev", "swift0")
     result["namespaceLinks"] = ip_json("-n", namespace, "-d", "link", "show", "dev", "swift0")
     result["forwarding"] = subprocess.check_output(
-        ["ip", "netns", "exec", namespace, "sysctl", "-n", "net.ipv4.ip_forward"], text=True
+        ["ip", "netns", "exec", namespace, "sysctl", "-n", "net.ipv4.ip_forward"], text=True, timeout=10
     ).strip()
 print(json.dumps(result, separators=(",", ":")))
 PYEOF
@@ -226,10 +250,17 @@ PYEOF
   }
   $rootLinks = @($guest.rootLinks | Where-Object { $null -ne $_ })
   if (-not $rootLinks.Count -or @($rootLinks | Where-Object {
-    $_.ifname -eq 'swiftvlan1' -or
-    ($_.linkinfo.info_kind -eq 'vlan' -and $_.linkinfo.info_data.id -eq 1)
+    $_.ifname -in @('swiftvlan1', 'swiftvlan2') -or
+    ($_.linkinfo.info_kind -eq 'vlan' -and $_.linkinfo.info_data.id -in @(1, 2))
   }).Count -ne 0) {
-    throw "Router '$VmName' must have no root swiftvlan1 or routing VLAN 1; the routing VLAN must reside inside $NamespaceName."
+    throw "Router '$VmName' must have no root routing VLAN 1/2; the backend VLAN must reside inside its namespace."
+  }
+  if (-not $Active) {
+    if (@($guest.ncIds).Count -ne 0 -or @($guest.customerIps).Count -ne 0 -or
+        @($guest.namespaces | Where-Object { $_ -in @('swift-ilb-router1', 'swift-ilb-router2', 'swift-ilb-backend2') }).Count -ne 0) {
+      throw "Inactive router '$VmName' must have no NC or customer SWIFT attachment (including legacy .6)."
+    }
+    return
   }
   $interfaces = @($guest.namespaceAddresses)
   $links = @($guest.namespaceLinks)
@@ -237,10 +268,15 @@ PYEOF
   if (@($guest.namespaces) -notcontains $NamespaceName -or
       $interfaces.Count -ne 1 -or $interfaces[0].ifname -ne 'swift0' -or
       $links.Count -ne 1 -or $links[0].ifname -ne 'swift0' -or
-      $links[0].linkinfo.info_kind -ne 'vlan' -or $links[0].linkinfo.info_data.id -ne 1 -or
-      $addresses.Count -ne 1 -or $addresses[0].local -ne $SwiftIp -or
-      $addresses[0].prefixlen -ne 32) {
-    throw "Router '$VmName' must have SWIFT VLAN interface swift0 (VLAN 1) with sole IP $SwiftIp/32 in $NamespaceName."
+      $links[0].linkinfo.info_kind -ne 'vlan' -or $links[0].linkinfo.info_data.id -ne $VlanId -or
+      $addresses.Count -ne 1 -or $addresses[0].local -ne '10.80.0.5' -or
+      $addresses[0].prefixlen -ne 32 -or @($guest.ncIds).Count -ne 1 -or
+      @($guest.customerIps).Count -ne 1 -or $guest.customerIps[0].ip -ne '10.80.0.5' -or
+      $guest.customerIps[0].namespace -ne $NamespaceName -or
+      @($guest.namespaces | Where-Object {
+        $_ -in @('swift-ilb-router1', 'swift-ilb-router2', 'swift-ilb-backend2') -and $_ -ne $NamespaceName
+      }).Count -ne 0) {
+    throw "Router '$VmName' must have exactly one SWIFT NC with VLAN swift0 (VLAN $VlanId), sole IP 10.80.0.5/32 in $NamespaceName, and no .6 attachment."
   }
   if ($guest.forwarding -ne '1') {
     throw "IPv4 forwarding must be enabled inside $NamespaceName on '$VmName'."
@@ -299,23 +335,21 @@ $vm2Ip = $outputs.vm2PrivateIp.value
 $vm2SubnetPrefix = $outputs.vm2SubnetPrefix.value
 $router1Name = $outputs.router1Name.value
 $routingBackendIp = $outputs.routingBackendIp.value
-$routerNamespaceName = $outputs.routerNamespaceName.value
+$routerNamespaceName = if ($BackendRouter -eq 'router1') { 'swift-ilb-router1' } else { 'swift-ilb-backend2' }
+$routingVlanId = if ($BackendRouter -eq 'router1') { 1 } else { 2 }
 $router2Name = $outputs.router2Name.value
 $router2PrimaryIp = $outputs.router2PrimaryIp.value
-$router2SwiftIp = $outputs.router2SwiftIp.value
-$router2NamespaceName = $outputs.router2NamespaceName.value
 $loadBalancerName = $outputs.loadBalancerName.value
 $ilbFrontendIp = $outputs.loadBalancerFrontendIp.value
 $backendPoolName = $outputs.backendPoolName.value
 
 if ($outputs.router1PrimaryIp.value -ne '10.30.0.4' -or $router2PrimaryIp -ne '10.30.0.5' -or
-    $routingBackendIp -ne '10.80.0.5' -or $outputs.router1SecondaryIp.value -ne $routingBackendIp -or
-    $routerNamespaceName -ne 'swift-ilb-router1' -or $outputs.routingVlanId.value -ne 1 -or
-    $router2SwiftIp -ne '10.80.0.6' -or $router2NamespaceName -ne 'swift-ilb-router2' -or
-    $outputs.router2VlanId.value -ne 1 -or
+    $routingBackendIp -ne '10.80.0.5' -or
     $vm1Ip -ne '10.80.1.4' -or $vm2Ip -ne '10.80.2.4') {
   throw 'Deployment outputs do not match the isolated infra/SWIFT routing topology.'
 }
+$activeName = if ($BackendRouter -eq 'router1') { $router1Name } else { $router2Name }
+$inactiveName = if ($BackendRouter -eq 'router1') { $router2Name } else { $router1Name }
 [System.Net.IPAddress] $frontendAddress = $null
 if (-not [System.Net.IPAddress]::TryParse([string] $ilbFrontendIp, [ref] $frontendAddress) -or
     $frontendAddress.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
@@ -376,15 +410,15 @@ if ($backends.Count -ne 1 -or $backends[0].ipAddress -ne $routingBackendIp -or
 }
 
 Assert-RouterGuestLayout -VmName $router1Name -PrimaryIp $outputs.router1PrimaryIp.value `
-  -NamespaceName $routerNamespaceName -SwiftIp $routingBackendIp
+  -NamespaceName $routerNamespaceName -VlanId $routingVlanId -Active ($BackendRouter -eq 'router1')
 Assert-RouterGuestLayout -VmName $router2Name -PrimaryIp $router2PrimaryIp `
-  -NamespaceName $router2NamespaceName -SwiftIp $router2SwiftIp
+  -NamespaceName $routerNamespaceName -VlanId $routingVlanId -Active ($BackendRouter -eq 'router2')
 
 Assert-EffectiveRoute -NicName $vm1NicName -DestinationPrefix $vm2SubnetPrefix -ExpectedNextHopIp $ilbFrontendIp
 Assert-EffectiveRoute -NicName $vm2NicName -DestinationPrefix $vm1SubnetPrefix -ExpectedNextHopIp $ilbFrontendIp
 
 Write-Host "  backend pool : $routingBackendIp only (SWIFT namespace $routerNamespaceName)" -ForegroundColor Green
-Write-Host "  excluded IP  : $router2SwiftIp (SWIFT namespace $router2NamespaceName)" -ForegroundColor Green
+Write-Host "  active router: $activeName, VLAN $routingVlanId; $inactiveName has no NC" -ForegroundColor Green
 Write-Host "  VM1 route    : $vm2SubnetPrefix via ILB $ilbFrontendIp" -ForegroundColor Green
 Write-Host "  VM2 route    : $vm1SubnetPrefix via ILB $ilbFrontendIp" -ForegroundColor Green
 
@@ -409,17 +443,49 @@ printf '%s\n' "$listeners" | grep -q 'pid='
 echo IPERF_SERVER_STARTED
 '@
 
-$serverResult = Invoke-VmShellScript -VmName $vm2Name -Operation 'persistent iperf3 listener' -Script $serverScript
+$serverResult = Invoke-VmShellScript -VmName $vm2Name -Operation 'persistent iperf3 listener' -TimeoutSeconds 15 -Script $serverScript
 if ($serverResult.Stdout -notmatch 'IPERF_SERVER_STARTED') {
   throw "Could not start iperf3 on '$vm2Name'."
 }
 
 try {
-  $router1Before = Get-ForwardedDatagrams -VmName $router1Name -NamespaceName $routerNamespaceName
-  $router2Before = Get-ForwardedDatagrams -VmName $router2Name -NamespaceName $router2NamespaceName
-  if ($router2Before -ne 0) {
-    throw "Router-2 namespace $router2NamespaceName ForwDatagrams must be zero before the UDP test."
+  $activeBefore = Get-ForwardedDatagrams -VmName $activeName -NamespaceName $routerNamespaceName
+  $inactiveBefore = Get-ForwardedDatagrams -VmName $inactiveName
+  foreach ($direction in @(
+    @{ Name = $vm1Name; Target = $vm2Ip; Tcp = 1 },
+    @{ Name = $vm2Name; Target = $vm1Ip; Tcp = 0 }
+  )) {
+    $connectivityScript = @'
+set -euo pipefail
+ping -c 2 -W 1 -w __TIMEOUT__ __TARGET__ >/dev/null
+if [ __TCP__ = 1 ]; then
+  python3 - <<'PY'
+import socket
+with socket.create_connection(("__TARGET__", 5201), timeout=__TIMEOUT__):
+    pass
+PY
+fi
+echo CONNECTIVITY_OK
+'@
+    $connectivityScript = $connectivityScript.Replace('__TIMEOUT__', [string]$ConnectivityTimeoutSeconds).
+      Replace('__TARGET__', $direction.Target).Replace('__TCP__', [string]$direction.Tcp)
+    $check = Invoke-VmShellScript -VmName $direction.Name -Operation "connectivity to $($direction.Target)" `
+      -TimeoutSeconds (2 * $ConnectivityTimeoutSeconds + 5) -Script $connectivityScript
+    if ($check.Stdout -ne 'CONNECTIVITY_OK') { throw "Connectivity check failed on $($direction.Name)." }
   }
+  $activeAfterConnectivity = Get-ForwardedDatagrams -VmName $activeName -NamespaceName $routerNamespaceName
+  $inactiveAfterConnectivity = Get-ForwardedDatagrams -VmName $inactiveName
+  $activeDelta = $activeAfterConnectivity - $activeBefore
+  $inactiveDelta = $inactiveAfterConnectivity - $inactiveBefore
+  if ($activeDelta -le 0 -or $inactiveDelta -ne 0) {
+    throw "Connectivity forwarding isolation failed: backend namespace delta=$activeDelta, inactive root delta=$inactiveDelta."
+  }
+  if ($ConnectivityOnly) {
+    Write-Host "Bidirectional ICMP and VM1 -> VM2 TCP/5201 succeeded through $BackendRouter ($routerNamespaceName); inactive root forwarding stayed unchanged." -ForegroundColor Green
+    return
+  }
+  $activeBefore = $activeAfterConnectivity
+  $inactiveBefore = $inactiveAfterConnectivity
 
   $streamRateMbps = [math]::Ceiling($UdpTargetMbps / $ParallelStreams)
   $effectiveTargetMbps = $streamRateMbps * $ParallelStreams
@@ -432,14 +498,14 @@ IPERF=/usr/local/bin/iperf3
 REPORT_READY=0
 trap 'rc=$?; printf "UDP client failed at line %s (exit %s): %s\n" "$LINENO" "$rc" "$BASH_COMMAND" >&2; if [ "$REPORT_READY" = 1 ] && [ -s "$REPORT" ]; then cat "$REPORT" >&2; fi; exit "$rc"' ERR
 "$IPERF" --help 2>&1 | grep -q -- '--gsro'
-ping -c 3 -W 3 "$TARGET" >/dev/null
 
 read -r _ cpu_user cpu_nice cpu_system cpu_idle cpu_iowait cpu_irq cpu_softirq cpu_steal _ </proc/stat
 CPU_TOTAL_BEFORE=$((cpu_user + cpu_nice + cpu_system + cpu_idle + cpu_iowait + cpu_irq + cpu_softirq + cpu_steal))
 CPU_IDLE_BEFORE=$((cpu_idle + cpu_iowait))
 
 REPORT_READY=1
-"$IPERF" -c "$TARGET" -p 5201 -u -P __STREAMS__ -b __STREAM_RATE__M \
+timeout --signal=TERM --kill-after=5s __CLIENT_TIMEOUT__s "$IPERF" -c "$TARGET" -p 5201 -u -P __STREAMS__ -b __STREAM_RATE__M \
+  --connect-timeout __CONNECT_TIMEOUT_MS__ \
   -l __DATAGRAM_BYTES__ -t __DURATION__ --gsro --json >"$REPORT"
 
 read -r _ cpu_user cpu_nice cpu_system cpu_idle cpu_iowait cpu_irq cpu_softirq cpu_steal _ </proc/stat
@@ -482,9 +548,12 @@ PYEOF
      -replace '__STREAMS__', $ParallelStreams `
      -replace '__STREAM_RATE__', $streamRateMbps `
      -replace '__DATAGRAM_BYTES__', $UdpDatagramBytes `
-     -replace '__DURATION__', $DurationSeconds
+     -replace '__DURATION__', $DurationSeconds `
+     -replace '__CLIENT_TIMEOUT__', ($DurationSeconds + $ConnectivityTimeoutSeconds + 10) `
+     -replace '__CONNECT_TIMEOUT_MS__', ($ConnectivityTimeoutSeconds * 1000)
 
-  $clientResult = Invoke-VmShellScript -VmName $vm1Name -Operation 'UDP GSRO client' -Script $clientScript
+  $clientResult = Invoke-VmShellScript -VmName $vm1Name -Operation 'UDP GSRO client' `
+    -TimeoutSeconds ($DurationSeconds + $ConnectivityTimeoutSeconds + 20) -Script $clientScript
   try {
     $result = $clientResult.Stdout | ConvertFrom-Json
   }
@@ -492,22 +561,22 @@ PYEOF
     throw 'Could not parse UDP result.'
   }
 
-  $router1After = Get-ForwardedDatagrams -VmName $router1Name -NamespaceName $routerNamespaceName
-  $router2After = Get-ForwardedDatagrams -VmName $router2Name -NamespaceName $router2NamespaceName
-  $router1Delta = $router1After - $router1Before
-  $router2Delta = $router2After - $router2Before
+  $activeAfter = Get-ForwardedDatagrams -VmName $activeName -NamespaceName $routerNamespaceName
+  $inactiveAfter = Get-ForwardedDatagrams -VmName $inactiveName
+  $activeDelta = $activeAfter - $activeBefore
+  $inactiveDelta = $inactiveAfter - $inactiveBefore
 
-  if ($router1Delta -le 0) {
-    throw "Router-1 did not forward any datagrams during the UDP test."
+  if ($activeDelta -le 0) {
+    throw "Backend router $activeName did not forward any datagrams in $routerNamespaceName."
   }
-  if ($router2After -ne 0 -or $router2Delta -ne 0) {
-    throw "Router-2 namespace $router2NamespaceName forwarded $router2Delta datagrams even though $router2SwiftIp is not in the ILB backend pool."
+  if ($inactiveDelta -ne 0) {
+    throw "Inactive router $inactiveName forwarded $inactiveDelta datagrams in root despite having no NC."
   }
 
   Write-Host ''
   Write-Host '===================== ILB-routed UDP throughput =====================' -ForegroundColor Cyan
   Write-Host "  path               : $vm1Name -> $ilbFrontendIp -> $routingBackendIp ($routerNamespaceName) -> $vm2Name"
-  Write-Host "  inactive router    : $router2Name (infra $router2PrimaryIp; SWIFT $router2SwiftIp in $router2NamespaceName, not in backend pool)"
+  Write-Host "  inactive router    : $inactiveName (no SWIFT NC)"
   Write-Host "  offered rate       : $effectiveTargetMbps Mbits/sec"
   Write-Host "  streams            : $ParallelStreams"
   Write-Host "  datagram           : $UdpDatagramBytes bytes"
@@ -517,8 +586,8 @@ PYEOF
   Write-Host ("  packet loss        : {0:N2}% ({1:N0}/{2:N0})" -f $result.lost_percent, $result.lost_packets, $result.packets)
   Write-Host ("  jitter             : {0:N3} ms" -f $result.jitter_ms)
   Write-Host ("  VM1 CPU            : {0:N1}%" -f $result.client_vm_cpu_percent)
-  Write-Host ("  router-1 forwarded : {0:N0} datagrams" -f $router1Delta)
-  Write-Host ("  router-2 forwarded : {0:N0} datagrams" -f $router2Delta)
+  Write-Host ("  backend forwarded  : {0:N0} datagrams in {1}" -f $activeDelta, $routerNamespaceName)
+  Write-Host ("  inactive forwarded : {0:N0} datagrams in root" -f $inactiveDelta)
   Write-Host '=====================================================================' -ForegroundColor Cyan
 }
 finally {
