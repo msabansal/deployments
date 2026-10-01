@@ -45,7 +45,8 @@ native host interface retains only its infra address. Neither router has any nat
 must be enabled **inside both SWIFT namespaces**; host forwarding alone is not
 sufficient. Router-2 receives no ILB-routed traffic and its SWIFT namespace forwarding
 counter stays zero.
-This variant does not include the reference topology's backend-IP migration script.
+This variant uses the SWIFT migration experiment below rather than the reference
+topology's native-NIC backend-IP migration script.
 
 This topology-local conversion is necessary for **ILB floating-IP transit**.
 The load balancer preserves the endpoint destination: for example, a SYN from
@@ -109,6 +110,106 @@ load-balancer name/frontend/pool outputs remain available. The
 output for route validation and reporting rather than hardcoding a frontend IP.
 
 ## Validate and test
+
+### Measure a live SWIFT migration
+
+```powershell
+python .\test-migration.py `
+  --duration 120 `
+  --migrate-after 30 `
+  --output-directory "$env:TEMP\swift-ilb-migration-results"
+```
+
+Requires Python, Azure CLI authentication in the topology's subscription,
+OpenSSH, the published Swift CLI, and the subnet delegator checkout. Override
+`--key`, `--swift-binary`, or `--delegator-project` for other local paths.
+The test reads router public addresses from deployment outputs and endpoint
+public addresses from Azure. It starts a dedicated, bounded one-shot VM2 iperf
+listener on 5203 with a server duration limit longer than the requested test,
+leaving the existing 5201 listener untouched.
+By default only iperf's TCP control connection uses authenticated management
+SSH forwards through the controller. A uniquely tagged, temporary VM1 OUTPUT
+DNAT rule redirects TCP destination `10.80.2.4:5203` to loopback port 5204.
+UDP data still traverses the unchanged ILB path. The rule and SSH forwards are
+removed on exit. This avoids losing the final iperf statistics when its in-band
+TCP control session times out across migration; it does **not** prove that an
+existing customer TCP connection survives the cutover. Use `--in-band-control`
+to reproduce that control-session behavior instead.
+Run `python .\test-migration-unit.py` for the offline coordinator regressions.
+
+Each run first restores `10.80.0.5` to router-1. It then sends the same
+two-stream, aggregate 5-Gbit/s UDP GSRO workload for 120 seconds, migrating
+router-1 to router-2 about 30 seconds into the run. Router-2 keeps its separate
+`10.80.0.6` attachment on VLAN 1; the migrated backend uses VLAN 2 in
+`swift-ilb-backend2`. No ILB pool or endpoint route is changed. A successful
+run leaves `10.80.0.5` on router-2; the ordinary test below expects the original
+router-1 placement and must not be run against that migrated state.
+Before starting the measurement clock it waits, bounded to 120 seconds, for
+actual UDP echo delivery through the restored baseline; NC-version readiness
+alone is not treated as proof of dataplane convergence.
+
+Source release and destination onboarding use pre-staged, root-private scripts
+and SSH sessions opened before traffic starts. The destination is triggered
+immediately upon observing the CLI's validated NC-deletion acknowledgement,
+before source namespace cleanup. Detached systemd jobs survive the transient
+management disconnect; log monitoring reconnects using numbered offsets without
+replaying either migration operation. Failed destination onboarding attempts
+restore router-1 after first stopping and removing the owned destination NC.
+Failures remain failures and retain root-private diagnostics; authentication
+scripts are removed.
+
+An independent UDP echo flow samples endpoint-to-endpoint connectivity at
+100 Hz during the load and for ten additional seconds. The CSV and JSON
+distinguish consecutive lost probes, initial/final loss, late echoes, and
+reordering. Flanked loss runs report the last-success-to-first-recovery receive
+gap and lost-send span, with 10-ms sampling, scheduling, and RTT uncertainty.
+The separate chronological successful-echo gap includes locally missed slots
+without classifying them as network loss; a missed scheduled probe cannot
+split and conceal a longer period with no observed replies.
+These are sampled round-trip observations, not exact fabric downtime. Local
+scheduler misses and send errors are recorded separately and explicitly mark
+sampling incomplete; they are never counted as network packet loss.
+Aggregate iperf loss is not used to calculate the outage. Controller release,
+trigger, POST, and readiness timings include SSH/log-observation latency and a
+50-ms log polling interval; they are not exact server-side timestamps.
+
+The output directory contains `summary.json`, the raw `iperf.json`,
+`controller-timings.json`, `probe-report.json`, and per-probe `probe.csv`.
+A temporary 5202 echo server, the 5203 one-shot iperf server, and this experiment's
+measurement jobs are stopped after the test; the persistent 5201 listener and
+router-2's original attachment remain intact.
+Measurements are also saved when the migration completes but forwarding
+isolation fails. Such a run prints the exact counter deltas and exits 2 instead
+of claiming success: the original `10.80.0.6` namespace must not carry the
+backend's traffic, and source-root forwarding must not increase. Probe-only
+scheduling misses are a separate, explicit sampling-quality warning.
+
+#### Observed migration on 2026-10-01
+
+A complete 120.001-second sender run offered 5.00 Gbit/s and received
+3.57 Gbit/s, with 28.38% iperf loss across the whole test. Source release was
+observed 31.68 seconds after the load command began. The already-open
+destination channel was triggered 0.138 ms after that observation; the NC
+creation POST was observed 0.556 seconds later. Full namespace/probe-service
+readiness was observed 46.32 seconds after release.
+
+The largest chronological UDP-echo success gap was **5.706 seconds**, bounded
+by received probes 3204 and 3774. There were 569 lost-sent probes and no local
+missed slots inside that interval. Other intervals did contain scheduling
+misses, so the raw report correctly marks overall sampling incomplete. The
+gap remains a 100-Hz sampled round-trip observation, with scheduling and RTT
+uncertainty, not exact fabric downtime.
+
+**Exclusive routing failed:** the original `10.80.0.6` namespace forwarded
+2,930,876 additional kernel datagrams, while the migrated `10.80.0.5`
+namespace forwarded only 2,152. Source-root forwarding stayed unchanged.
+Both router-2 NCs remained present, the original `10.80.0.6` NC was retained,
+router-1 had no NCs, and the ILB pool still contained only `10.80.0.5`.
+Therefore the observed recovery must not be described as a verified clean
+handoff to the migrated backend. This run intentionally exited 2 and saved
+its full measurement evidence.
+
+### Test the original router-1 placement
 
 ```powershell
 .\test-throughput.ps1 `
