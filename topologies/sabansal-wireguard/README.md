@@ -31,17 +31,31 @@ Defaults:
 
 The deployment script creates the resource group, deploys both VMs, exchanges
 their WireGuard public keys, configures the server and client, verifies the
-tunnel, and runs 30-second TCP and UDP iperf3 tests. TCP uses four parallel
-streams. UDP targets 2 Gbit/s and reports received throughput, packet loss, and
-jitter.
+tunnel, and runs 30-second TCP and UDP iperf3 tests using eight parallel TCP
+streams.
+Based on the validated packet-rate envelopes of this two-vCPU topology, the
+default UDP aggregate target is 60% of the immediately preceding direct TCP
+result or 105% of the WireGuard TCP result. Pass `-UdpTargetMbps` to test a
+specific offered load. The deployment installs a pinned,
+checksum-verified iperf3 build with UDP GSO/GRO support. UDP uses kernel/NIC
+segmentation and receive offload with MTU-safe 1,380-byte datagrams instead of
+independent CPU-bound userspace generators. It uses at most one GSO-enabled
+iperf3 thread per vCPU and divides the aggregate target across those threads.
+UDP reports received throughput, packet loss, jitter, and whole-VM vCPU
+utilization. The build also applies the
+upstream iperf3 GRO receive-loop CPU fix from commit
+`ee73f1740f689cafde3cde13d711eecbac985090`.
+
+The topology uses the maximum IPv4 WireGuard MTU of 1,440 bytes over the
+1,500-byte Azure VNet MTU, enables supported UDP/GRO NIC offloads, and raises
+kernel UDP buffers and the network receive backlog.
 
 Run the throughput test again with:
 
 ```powershell
 .\test-throughput.ps1 `
   -ResourceGroupName sabansal-wireguard-rg `
-  -ParallelConnections 4 `
-  -UdpTargetMbps 2000 `
+  -ParallelConnections 8 `
   -DurationSeconds 30
 ```
 
@@ -51,9 +65,10 @@ Benchmark the direct VNet path instead of the WireGuard tunnel:
 .\test-throughput.ps1 `
   -ResourceGroupName sabansal-wireguard-rg `
   -Path Direct `
-  -ParallelConnections 4 `
-  -UdpTargetMbps 2000 `
+  -ParallelConnections 8 `
   -DurationSeconds 30
 ```
 
 Direct mode targets `10.70.0.4` and fails if the selected route uses `wg0`.
+Pass `-UdpTargetMbps <n>` to override the automatic UDP target.
+Pass `-UdpDatagramBytes <n>` to test a different UDP datagram size.

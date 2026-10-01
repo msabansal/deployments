@@ -36,13 +36,51 @@ var installToolsScript = '''
 set -euo pipefail
 
 if command -v tdnf >/dev/null 2>&1; then
-  tdnf install -y wireguard-tools iperf3 iproute iputils
+  tdnf install -y wireguard-tools iproute iputils ethtool curl tar gcc make autoconf automake libtool openssl-devel
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y wireguard-tools iperf3 iproute iputils
+  dnf install -y wireguard-tools iproute iputils ethtool curl tar gcc make autoconf automake libtool openssl-devel
 else
   echo "No supported package manager found" >&2
   exit 1
 fi
+
+iperf_version=3.22
+iperf_archive="iperf-$iperf_version.tar.gz"
+iperf_sha256=1c0d0fb02c52626111d6e132db80edfbf27bbaff8bd9245df2a371dcb0b35a92
+iperf_gro_cpu_fix=ee73f1740f689cafde3cde13d711eecbac985090
+iperf_marker=/usr/local/share/iperf3-gsro-cpu-fix
+if ! /usr/local/bin/iperf3 --help 2>&1 | grep -q -- '--gsro' \
+    || ! grep -qx "$iperf_gro_cpu_fix" "$iperf_marker" 2>/dev/null; then
+  build_dir=$(mktemp -d)
+  trap 'rm -rf "$build_dir"' EXIT
+  cd "$build_dir"
+  curl -fsSLO "https://github.com/esnet/iperf/releases/download/$iperf_version/$iperf_archive"
+  echo "$iperf_sha256  $iperf_archive" | sha256sum -c -
+  tar -xzf "$iperf_archive"
+  cd "iperf-$iperf_version"
+  grep -q 'ret = recvmsg(fd, &msg, MSG_DONTWAIT);' src/net.c
+  sed -i '/ret = recvmsg(fd, &msg, MSG_DONTWAIT);/s/MSG_DONTWAIT/0/' src/net.c
+  grep -q 'ret = recvmsg(fd, &msg, 0);' src/net.c
+  ./configure --prefix=/usr/local
+  make -j"$(nproc)"
+  make install
+  ldconfig
+  install -d /usr/local/share
+  echo "$iperf_gro_cpu_fix" >"$iperf_marker"
+fi
+/usr/local/bin/iperf3 --help 2>&1 | grep -q -- '--gsro'
+
+cat >/etc/sysctl.d/90-wireguard-throughput.conf <<EOF
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.netdev_max_backlog = 250000
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+EOF
+sysctl --system >/dev/null
+
+ethtool -K eth0 gro on gso on tso on 2>/dev/null || true
+ethtool -K eth0 rx-udp-gro-forwarding on 2>/dev/null || true
 
 install -d -m 700 /etc/wireguard
 if [ ! -s /etc/wireguard/privatekey ]; then
@@ -58,7 +96,7 @@ if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewa
   firewall-cmd --reload
 fi
 
-echo "WireGuard and iperf3 installed"
+echo "WireGuard and GSO-enabled iperf3 installed"
 '''
 
 resource nsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {

@@ -8,10 +8,13 @@ param(
   [string] $Path = 'WireGuard',
 
   [ValidateRange(1, 32)]
-  [int] $ParallelConnections = 4,
+  [int] $ParallelConnections = 8,
 
-  [ValidateRange(1, 10000)]
-  [int] $UdpTargetMbps = 2000,
+  [ValidateRange(0, 100000)]
+  [int] $UdpTargetMbps = 0,
+
+  [ValidateRange(64, 65507)]
+  [int] $UdpDatagramBytes = 1380,
 
   [ValidateRange(5, 600)]
   [int] $DurationSeconds = 30
@@ -79,19 +82,27 @@ $clientVmName = $outputs.clientVmName.value
 $serverTunnelIp = $outputs.serverTunnelIp.value
 $serverPrivateIp = $outputs.serverPrivateIp.value
 $targetIp = if ($Path -eq 'WireGuard') { $serverTunnelIp } else { $serverPrivateIp }
+$udpAutoPercent = if ($Path -eq 'WireGuard') { 105 } else { 60 }
 
-$serverResult = Invoke-VmShellScript -VmName $serverVmName -Script @'
+$serverScript = @'
 set -euo pipefail
+IPERF=$(command -v iperf3)
+"$IPERF" --help 2>&1 | grep -q -- '--gsro' || {
+  echo "iperf3 does not support --gsro; deploy the topology again to install the pinned GSO-enabled build." >&2
+  exit 1
+}
 if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
   firewall-cmd --add-port=5201/tcp
   firewall-cmd --add-port=5201/udp
 fi
 pkill -f 'iperf3 -s' 2>/dev/null || true
-iperf3 -s --daemon --port 5201
+"$IPERF" -s --daemon --port 5201
 sleep 2
 pgrep -f 'iperf3 -s' >/dev/null
 echo IPERF_SERVER_STARTED
 '@
+
+$serverResult = Invoke-VmShellScript -VmName $serverVmName -Script $serverScript
 
 if ($serverResult.Stdout -notmatch 'IPERF_SERVER_STARTED') {
   throw "Could not start iperf3 on the WireGuard server. stdout: $($serverResult.Stdout) stderr: $($serverResult.Stderr)"
@@ -101,6 +112,11 @@ try {
   $clientScript = @'
 set -euo pipefail
 TARGET=__TARGET_IP__
+IPERF=$(command -v iperf3)
+"$IPERF" --help 2>&1 | grep -q -- '--gsro' || {
+  echo "iperf3 does not support --gsro; deploy the topology again to install the pinned GSO-enabled build." >&2
+  exit 1
+}
 ROUTE=$(ip route get "$TARGET")
 if [ "__PATH_MODE__" = "WireGuard" ]; then
   echo "$ROUTE" | grep -q 'dev wg0' || {
@@ -115,10 +131,49 @@ fi
 ping -c 3 -W 3 "$TARGET" >/dev/null
 TCP_REPORT=/tmp/wireguard-iperf-tcp.json
 UDP_REPORT=/tmp/wireguard-iperf-udp.json
-iperf3 -c "$TARGET" -p 5201 -P __STREAMS__ -t __DURATION__ --json >"$TCP_REPORT"
-iperf3 -c "$TARGET" -p 5201 -u -b __UDP_RATE__M -l 1200 -t __DURATION__ --json >"$UDP_REPORT"
+"$IPERF" -c "$TARGET" -p 5201 -P __STREAMS__ -w 4M -Z -t __DURATION__ --json >"$TCP_REPORT"
 
-python3 - "$TCP_REPORT" "$UDP_REPORT" "$ROUTE" <<'PYEOF'
+UDP_TARGET_MBPS=__UDP_RATE__
+if [ "$UDP_TARGET_MBPS" -eq 0 ]; then
+  UDP_TARGET_MBPS=$(python3 - "$TCP_REPORT" <<'PYEOF'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    report = json.load(handle)
+
+received_bps = report["end"]["sum_received"]["bits_per_second"]
+print(max(1, int(received_bps * __UDP_AUTO_PERCENT__ / 100 / 1_000_000)))
+PYEOF
+)
+fi
+
+VCPU_COUNT=$(nproc)
+UDP_STREAMS=$VCPU_COUNT
+if [ "$UDP_STREAMS" -gt __STREAMS__ ]; then
+  UDP_STREAMS=__STREAMS__
+fi
+run_udp() {
+  local target_mbps=$1
+  local duration=$2
+  local report=$3
+  local stream_rate_mbps=$(( (target_mbps + UDP_STREAMS - 1) / UDP_STREAMS ))
+  "$IPERF" -c "$TARGET" -p 5201 -u -P "$UDP_STREAMS" -b "${stream_rate_mbps}M" \
+    -l __UDP_DATAGRAM_BYTES__ -t "$duration" --gsro --json >"$report"
+}
+
+UDP_STREAM_RATE_MBPS=$(( (UDP_TARGET_MBPS + UDP_STREAMS - 1) / UDP_STREAMS ))
+UDP_EFFECTIVE_TARGET_MBPS=$(( UDP_STREAM_RATE_MBPS * UDP_STREAMS ))
+read -r _ cpu_user cpu_nice cpu_system cpu_idle cpu_iowait cpu_irq cpu_softirq cpu_steal _ </proc/stat
+CPU_TOTAL_BEFORE=$((cpu_user + cpu_nice + cpu_system + cpu_idle + cpu_iowait + cpu_irq + cpu_softirq + cpu_steal))
+CPU_IDLE_BEFORE=$((cpu_idle + cpu_iowait))
+run_udp "$UDP_TARGET_MBPS" __DURATION__ "$UDP_REPORT"
+read -r _ cpu_user cpu_nice cpu_system cpu_idle cpu_iowait cpu_irq cpu_softirq cpu_steal _ </proc/stat
+CPU_TOTAL_AFTER=$((cpu_user + cpu_nice + cpu_system + cpu_idle + cpu_iowait + cpu_irq + cpu_softirq + cpu_steal))
+CPU_IDLE_AFTER=$((cpu_idle + cpu_iowait))
+
+python3 - "$TCP_REPORT" "$UDP_REPORT" "$ROUTE" "$UDP_EFFECTIVE_TARGET_MBPS" "$UDP_STREAMS" "$VCPU_COUNT" \
+  "$CPU_TOTAL_BEFORE" "$CPU_IDLE_BEFORE" "$CPU_TOTAL_AFTER" "$CPU_IDLE_AFTER" <<'PYEOF'
 import json
 import sys
 
@@ -137,6 +192,13 @@ tcp_received = tcp_report["end"]["sum_received"]
 udp_end = udp_report["end"]
 udp_sent = udp_end.get("sum_sent") or udp_end["sum"]
 udp_received = udp_end.get("sum_received") or udp_end["sum"]
+udp_cpu = udp_end.get("cpu_utilization_percent", {})
+udp_streams = int(sys.argv[5])
+vcpu_count = int(sys.argv[6])
+cpu_total_delta = int(sys.argv[9]) - int(sys.argv[7])
+cpu_idle_delta = int(sys.argv[10]) - int(sys.argv[8])
+client_vm_cpu = 100.0 * (cpu_total_delta - cpu_idle_delta) / cpu_total_delta
+
 print(json.dumps({
     "route": sys.argv[3],
     "tcp": {
@@ -146,6 +208,10 @@ print(json.dumps({
         "retransmits": tcp_sent.get("retransmits", 0),
     },
     "udp": {
+        "target_mbps": int(sys.argv[4]),
+        "datagram_bytes": __UDP_DATAGRAM_BYTES__,
+        "offload": "GSO/GRO",
+        "streams": udp_streams,
         "seconds": udp_received["seconds"],
         "bits_per_second_sent": udp_sent["bits_per_second"],
         "bits_per_second_received": udp_received["bits_per_second"],
@@ -153,6 +219,9 @@ print(json.dumps({
         "lost_packets": udp_received.get("lost_packets", 0),
         "packets": udp_received.get("packets", 0),
         "lost_percent": udp_received.get("lost_percent", 0),
+        "client_cpu_percent": udp_cpu.get("host_total", 0) / vcpu_count,
+        "server_cpu_percent": udp_cpu.get("remote_total", 0) / vcpu_count,
+        "client_vm_cpu_percent": client_vm_cpu,
     },
 }, separators=(",", ":")))
 PYEOF
@@ -160,6 +229,8 @@ PYEOF
      -replace '__PATH_MODE__', $Path `
      -replace '__STREAMS__', $ParallelConnections `
      -replace '__UDP_RATE__', $UdpTargetMbps `
+     -replace '__UDP_AUTO_PERCENT__', $udpAutoPercent `
+     -replace '__UDP_DATAGRAM_BYTES__', $UdpDatagramBytes `
      -replace '__DURATION__', $DurationSeconds
 
   $clientResult = Invoke-VmShellScript -VmName $clientVmName -Script $clientScript
@@ -183,12 +254,17 @@ PYEOF
   Write-Host ("    received    : {0:N2} Gbits/sec" -f ($result.tcp.bits_per_second_received / 1e9)) -ForegroundColor Green
   Write-Host ("    retransmits : {0:N0}" -f $result.tcp.retransmits)
   Write-Host ''
-  Write-Host "  UDP (target $UdpTargetMbps Mbits/sec)"
+  Write-Host ("  UDP (target {0:N0} Mbits/sec, {1})" -f $result.udp.target_mbps, $result.udp.offload)
+  Write-Host ("    streams     : {0:N0}" -f $result.udp.streams)
+  Write-Host ("    datagram    : {0:N0} bytes" -f $result.udp.datagram_bytes)
   Write-Host ("    duration    : {0:N1} seconds" -f $result.udp.seconds)
   Write-Host ("    sent        : {0:N2} Gbits/sec" -f ($result.udp.bits_per_second_sent / 1e9)) -ForegroundColor Green
   Write-Host ("    received    : {0:N2} Gbits/sec" -f ($result.udp.bits_per_second_received / 1e9)) -ForegroundColor Green
   Write-Host ("    packet loss : {0:N2}% ({1:N0}/{2:N0})" -f $result.udp.lost_percent, $result.udp.lost_packets, $result.udp.packets)
   Write-Host ("    jitter      : {0:N3} ms" -f $result.udp.jitter_ms)
+  Write-Host ("    client VM CPU    : {0:N1}%" -f $result.udp.client_vm_cpu_percent)
+  Write-Host ("    client iperf CPU : {0:N1}%" -f $result.udp.client_cpu_percent)
+  Write-Host ("    server iperf CPU : {0:N1}%" -f $result.udp.server_cpu_percent)
   Write-Host '============================================================' -ForegroundColor Cyan
 }
 finally {

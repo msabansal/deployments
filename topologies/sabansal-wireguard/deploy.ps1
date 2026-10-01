@@ -122,6 +122,7 @@ PRIVATE_KEY=$(cat /etc/wireguard/privatekey)
 cat >/etc/wireguard/wg0.conf <<EOF
 [Interface]
 Address = __SERVER_TUNNEL_IP__/24
+MTU = 1440
 ListenPort = 51820
 PrivateKey = ${PRIVATE_KEY}
 
@@ -144,6 +145,7 @@ PRIVATE_KEY=$(cat /etc/wireguard/privatekey)
 cat >/etc/wireguard/wg0.conf <<EOF
 [Interface]
 Address = __CLIENT_TUNNEL_IP__/24
+MTU = 1440
 PrivateKey = ${PRIVATE_KEY}
 
 [Peer]
