@@ -22,7 +22,15 @@ param adminUsername string = 'azureuser'
 @secure()
 param adminPublicKey string
 
-param vmSize string = 'Standard_D4d_v5'
+param vmSize string = 'Standard_D2als_v6'
+
+@description('Disk controller supported by the VM size. D2als_v6 requires NVMe.')
+@allowed([
+  'SCSI'
+  'NVMe'
+])
+param diskControllerType string = 'NVMe'
+
 param imageVersion string = 'latest'
 
 var sshRules = [
@@ -44,7 +52,6 @@ var sshRules = [
 var dnsRules = [
   for (rule, index) in [
     { name: 'AllowResolverDns', destination: resolverIpAddress, access: 'Allow' }
-    { name: 'AllowAzureDns', destination: 'AzurePlatformDNS', access: 'Allow' }
     { name: 'DenyOtherDns', destination: '*', access: 'Deny' }
   ]: {
     name: rule.name
@@ -271,7 +278,7 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
       }
     }
     storageProfile: {
-      diskControllerType: 'SCSI'
+      diskControllerType: diskControllerType
       imageReference: {
         publisher: 'MicrosoftAzureLinux'
         offer: 'azurelinux-4'

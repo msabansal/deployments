@@ -28,9 +28,11 @@ handling can affect whether a live Bing response resolves successfully; the
 post-deployment probe verifies the actual response without expanding the allow list.
 See [DNS resolver policy](https://learn.microsoft.com/azure/dns/dns-security-policy).
 
-The VM subnet NSG permits TCP/UDP port 53 to the inbound endpoint and Azure
-platform DNS, and denies port 53 to other servers. The policy applies to both
-approved paths. This is DNS filtering, **not internet egress isolation**:
+The VM subnet NSG permits TCP/UDP port 53 to the inbound endpoint and denies
+port 53 to other servers. Azure platform DNS is exempt from ordinary NSG rules
+and remains reachable without an explicit `AzurePlatformDNS` deny rule.
+The resolver policy applies to both DNS paths.
+This is DNS filtering, **not internet egress isolation**:
 DNS-over-HTTPS, DNS-over-TLS, and connections to literal IP addresses are not blocked.
 
 Blocking other names can break package installation, VM extensions, Azure
@@ -47,7 +49,7 @@ supports DNS Private Resolver, DNS resolver policies, and the Azure Linux image.
 The resolver endpoint, policy, and VM incur Azure charges.
 
 ```powershell
-.\deploy.ps1 -ResourceGroupName rg-vm-dns-bing-only -Location eastus `
+.\deploy.ps1 -ResourceGroupName rg-vm-dns-bing-only -Location centralindia `
   -SshPublicKeyPath '~\.ssh\id_ed25519.pub'
 ```
 
@@ -59,8 +61,10 @@ Edit `main.bicepparam` for network ranges, username, or image version.
 If changing the resolver subnet, also change `resolverIpAddress` to a usable
 address in that subnet. Its first four addresses and last address are reserved.
 The resolver subnet must be dedicated and between `/28` and `/24`.
-`-VmName` and `-VmSize` override their defaults; the VM size must support SCSI
-and Accelerated Networking (default `Standard_D4d_v5`, 4 vCPUs, 16 GiB).
+`-VmName`, `-VmSize`, and `-DiskControllerType` override their defaults. The VM
+size must support the selected controller and Accelerated Networking (default
+`Standard_D2als_v6`, 2 vCPUs, 4 GiB, NVMe). When using a SCSI-only size, also
+pass `-DiskControllerType SCSI`.
 The OS disk is Standard SSD and authentication is SSH-key only.
 
 ## Verify DNS after deployment

@@ -15,7 +15,10 @@ param(
   [string] $SshPublicKeyPath = '~\.ssh\id_ed25519.pub',
 
   [ValidateNotNullOrEmpty()]
-  [string] $VmSize
+  [string] $VmSize,
+
+  [ValidateSet('SCSI', 'NVMe')]
+  [string] $DiskControllerType
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +40,9 @@ $deploymentParameters = @(
 )
 if ($PSBoundParameters.ContainsKey('VmSize')) {
   $deploymentParameters += "vmSize=$VmSize"
+}
+if ($PSBoundParameters.ContainsKey('DiskControllerType')) {
+  $deploymentParameters += "diskControllerType=$DiskControllerType"
 }
 
 az group create --name $ResourceGroupName --location $Location --output none
