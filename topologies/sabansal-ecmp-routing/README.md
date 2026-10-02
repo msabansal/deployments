@@ -78,3 +78,8 @@ Re-run only the benchmark with:
   -UdpDatagramBytes 1350 `
   -DurationSeconds 30
 ```
+
+## Test results
+
+See [Azure Linux networking test results](test-results.md) for the consolidated
+direct, WireGuard, ILB, and ECMP benchmark and failover results.
