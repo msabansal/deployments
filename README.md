@@ -22,6 +22,7 @@ _template/               starting point for a new topology
 | Topology | Description |
 | --- | --- |
 | [`azurelinux-vm`](topologies/azurelinux-vm/README.md) | One Azure Linux 4 VM on Ddv5 (4 vCPUs), with a Standard SSD OS disk, public IP, and subnet NSG allowing corpnet and SAW access. |
+| [`vm-dns-bing-only`](topologies/vm-dns-bing-only/README.md) | One Azure Linux VM and DNS Private Resolver with a VNet-linked policy allowing `www.bing.com` and blocking other domains using native Azure DNS matching. |
 | [`vnet-to-vnet-expressroute`](topologies/vnet-to-vnet-expressroute/README.md) | Two VNets connected through an ExpressRoute circuit with zone-redundant gateways, private peering, and optional Azure Linux test VMs. |
 | [`vm-ip-forwarding`](topologies/vm-ip-forwarding/README.md) | Two Linux VMs exchanging traffic through a third VM that forwards packets with OS routing. Router is Azure Linux 4 or Windows Server 2022, with Accelerated Networking. |
 | [`sabansal-ilb-routing-two-infra`](topologies/sabansal-ilb-routing-two-infra/README.md) | Routers in an isolated infrastructure VNet attach customer IPs through SWIFT; only router 1's SWIFT IP is an ILB backend. |
