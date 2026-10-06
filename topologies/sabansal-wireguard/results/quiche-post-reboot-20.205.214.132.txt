@@ -1,0 +1,44 @@
+b8fb5c3c-50ee-4c00-8ffe-7fdc0b509a35
+active
+enabled
+active
+net.core.busy_poll = 50
+net.core.busy_read = 50
+net.core.busy_poll = 50
+net.core.busy_read = 50
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP mode DEFAULT group default qlen 1000\    link/ether 70:a8:a5:72:c8:7d brd ff:ff:ff:ff:ff:ff\    alias Network Device\    altname enx70a8a572c87d
+3: ens1: <BROADCAST,MULTICAST,SLAVE,UP,LOWER_UP> mtu 1500 qdisc mq master eth0 state UP mode DEFAULT group default qlen 1000\    link/ether 70:a8:a5:72:c8:7d brd ff:ff:ff:ff:ff:ff\    altname enp0s0
+Ring parameters for ens1:
+Pre-set maximums:
+RX:			8192
+RX Mini:		n/a
+RX Jumbo:		n/a
+TX:			16384
+TX push buff len:	n/a
+HDS thresh:		n/a
+Current hardware settings:
+RX:			2048
+RX Mini:		n/a
+RX Jumbo:		n/a
+TX:			4096
+RX Buf Len:		n/a
+CQE Size:		n/a
+TX Push:		off
+RX Push:		off
+TX push buff len:	n/a
+TCP data split:		n/a
+HDS thresh:		n/a
+
+RX flow hash indirection table for ens1 with 2 RX ring(s):
+    0:      0     1     0     1     0     1     0     1
+    8:      0     1     0     1     0     1     0     1
+   16:      0     1     0     1     0     1     0     1
+   24:      0     1     0     1     0     1     0     1
+eth0 tx0 XPS=0
+eth0 tx1 XPS=0
+ens1 tx0 XPS=0
+ens1 tx1 XPS=0
+CPU collector unit: static (inactive)
+enabled
+UNCONN 0      0           10.70.0.4:4433      0.0.0.0:*
+UNCONN 0      0           10.70.0.4:4434      0.0.0.0:*

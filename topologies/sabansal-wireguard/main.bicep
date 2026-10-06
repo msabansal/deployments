@@ -16,6 +16,28 @@ param adminPublicKey string
 @description('VM size. Standard_D2als_v7 requires an NVMe disk controller.')
 param vmSize string = 'Standard_D2als_v7'
 
+@description('Availability zone for both VMs, or empty for a regional deployment.')
+@allowed([
+  ''
+  '1'
+  '2'
+  '3'
+])
+param availabilityZone string = ''
+
+@description('Opt in to measured two-vCPU MANA ring/RSS tuning and persistent offloads. Does not change MTU.')
+param optimizeThroughput bool = false
+
+@description('Benchmark transport. quiche uses direct private-IP QUIC without a WireGuard tunnel.')
+@allowed([
+  'WireGuard'
+  'Quiche'
+])
+param transport string = 'WireGuard'
+
+@description('Opt in to 50-microsecond kernel busy polling for dedicated quiche benchmarks. May consume both vCPUs continuously.')
+param quicheBusyPolling bool = false
+
 @description('Address space of the virtual network.')
 param vnetAddressPrefix string = '10.70.0.0/16'
 
@@ -100,6 +122,134 @@ fi
 
 echo "WireGuard and GSO-enabled iperf3 installed"
 '''
+
+var throughputSetupScript = replace('''
+
+cat >/usr/local/sbin/configure-wireguard-throughput <<'TUNING_SCRIPT'
+__THROUGHPUT_SCRIPT__
+TUNING_SCRIPT
+chmod 755 /usr/local/sbin/configure-wireguard-throughput
+cat >/etc/systemd/system/wireguard-throughput.service <<'TUNING_UNIT'
+[Unit]
+Description=WireGuard MANA throughput tuning
+Wants=network-online.target
+After=network-online.target
+Before=wg-quick@wg0.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/configure-wireguard-throughput
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+TUNING_UNIT
+cat >/etc/systemd/system/wireguard-receive-affinity.service <<'AFFINITY_UNIT'
+[Unit]
+Description=WireGuard receive poller CPU placement
+Requires=wg-quick@wg0.service
+After=wg-quick@wg0.service
+PartOf=wg-quick@wg0.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/configure-wireguard-throughput --receive-affinity
+RemainAfterExit=yes
+
+[Install]
+WantedBy=wg-quick@wg0.service
+AFFINITY_UNIT
+systemctl daemon-reload
+systemctl enable wireguard-throughput.service
+systemctl enable wireguard-receive-affinity.service
+systemctl restart wireguard-throughput.service
+''', '__THROUGHPUT_SCRIPT__', loadTextContent('configure-throughput.sh'))
+
+var throughputDisableScript = '''
+
+for unit in wireguard-receive-affinity.service wireguard-throughput.service; do
+  if [ -f "/etc/systemd/system/$unit" ]; then
+    systemctl disable --now "$unit"
+    echo "$unit disabled; existing NIC settings return to defaults after reboot"
+  fi
+done
+if [ -f /etc/systemd/system/irqbalance.service.d/wireguard-throughput.conf ]; then
+  rm /etc/systemd/system/irqbalance.service.d/wireguard-throughput.conf
+  systemctl daemon-reload
+  if systemctl is-active --quiet irqbalance.service; then
+    systemctl restart irqbalance.service
+  fi
+fi
+'''
+
+var quicheSetupScript = replace('''
+
+cat >/usr/local/sbin/configure-quiche-throughput <<'TUNING_SCRIPT'
+__THROUGHPUT_SCRIPT__
+TUNING_SCRIPT
+chmod 755 /usr/local/sbin/configure-quiche-throughput
+cat >/etc/systemd/system/quiche-throughput.service <<'TUNING_UNIT'
+[Unit]
+Description=quiche MANA offload and ring tuning
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/configure-quiche-throughput --nic-only
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+TUNING_UNIT
+systemctl daemon-reload
+systemctl enable quiche-throughput.service
+systemctl restart quiche-throughput.service
+''', '__THROUGHPUT_SCRIPT__', loadTextContent('configure-throughput.sh'))
+
+var quicheDisableScript = '''
+
+if [ -f /etc/systemd/system/quiche-throughput.service ]; then
+  systemctl disable --now quiche-throughput.service
+fi
+'''
+
+var quicheModeScript = '''
+
+systemctl disable --now wg-quick@wg0.service
+if ip link show wg0 >/dev/null 2>&1; then
+  echo "quiche mode requires WireGuard to be stopped" >&2
+  exit 1
+fi
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+  firewall-cmd --permanent --add-port=4434/udp
+  firewall-cmd --add-port=4434/udp
+fi
+echo QUICHE_DIRECT_MODE_READY
+'''
+
+var quicheBusyPollingEnableScript = '''
+
+cat >/etc/sysctl.d/91-quiche-busy-poll.conf <<'BUSY_POLL'
+net.core.busy_poll = 50
+net.core.busy_read = 50
+BUSY_POLL
+sysctl -p /etc/sysctl.d/91-quiche-busy-poll.conf
+'''
+
+var quicheBusyPollingDisableScript = '''
+
+if [ -f /etc/sysctl.d/91-quiche-busy-poll.conf ]; then
+  rm /etc/sysctl.d/91-quiche-busy-poll.conf
+  sysctl -w net.core.busy_poll=0 net.core.busy_read=0
+fi
+'''
+
+var transportModeScript = transport == 'WireGuard'
+  ? '${quicheDisableScript}${optimizeThroughput ? throughputSetupScript : throughputDisableScript}'
+  : '${throughputDisableScript}${quicheModeScript}${optimizeThroughput ? quicheSetupScript : quicheDisableScript}'
+
+var transportSetupScript = '${transportModeScript}${transport == 'Quiche' && quicheBusyPolling ? quicheBusyPollingEnableScript : quicheBusyPollingDisableScript}'
 
 resource nsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
   name: '${namePrefix}-nsg'
@@ -258,6 +408,9 @@ resource clientNic 'Microsoft.Network/networkInterfaces@2024-05-01' = {
 resource serverVm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
   name: serverVmName
   location: location
+  zones: empty(availabilityZone) ? null : [
+    availabilityZone
+  ]
   properties: {
     hardwareProfile: {
       vmSize: vmSize
@@ -314,6 +467,9 @@ resource serverVm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
 resource clientVm 'Microsoft.Compute/virtualMachines@2024-07-01' = {
   name: clientVmName
   location: location
+  zones: empty(availabilityZone) ? null : [
+    availabilityZone
+  ]
   properties: {
     hardwareProfile: {
       vmSize: vmSize
@@ -374,7 +530,7 @@ resource installServerTools 'Microsoft.Compute/virtualMachines/runCommands@2024-
   properties: {
     treatFailureAsDeploymentFailure: true
     source: {
-      script: replace(installToolsScript, '\r', '')
+      script: replace('${installToolsScript}${transportSetupScript}', '\r', '')
     }
   }
 }
@@ -386,7 +542,7 @@ resource installClientTools 'Microsoft.Compute/virtualMachines/runCommands@2024-
   properties: {
     treatFailureAsDeploymentFailure: true
     source: {
-      script: replace(installToolsScript, '\r', '')
+      script: replace('${installToolsScript}${transportSetupScript}', '\r', '')
     }
   }
 }

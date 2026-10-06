@@ -7,6 +7,10 @@ param(
   [ValidateSet('WireGuard', 'Direct')]
   [string] $Path = 'WireGuard',
 
+  [switch] $Reverse,
+
+  [string] $OutputPath,
+
   [ValidateRange(1, 32)]
   [int] $ParallelConnections = 8,
 
@@ -95,10 +99,9 @@ if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewa
   firewall-cmd --add-port=5201/tcp
   firewall-cmd --add-port=5201/udp
 fi
-pkill -f 'iperf3 -s' 2>/dev/null || true
-"$IPERF" -s --daemon --port 5201
+systemd-run --collect --unit=wireguard-throughput-iperf "$IPERF" -s --port 5201
 sleep 2
-pgrep -f 'iperf3 -s' >/dev/null
+systemctl is-active --quiet wireguard-throughput-iperf
 echo IPERF_SERVER_STARTED
 '@
 
@@ -134,7 +137,7 @@ UDP_REPORT=/tmp/wireguard-iperf-udp.json
 read -r _ tcp_cpu_user tcp_cpu_nice tcp_cpu_system tcp_cpu_idle tcp_cpu_iowait tcp_cpu_irq tcp_cpu_softirq tcp_cpu_steal _ </proc/stat
 TCP_CPU_TOTAL_BEFORE=$((tcp_cpu_user + tcp_cpu_nice + tcp_cpu_system + tcp_cpu_idle + tcp_cpu_iowait + tcp_cpu_irq + tcp_cpu_softirq + tcp_cpu_steal))
 TCP_CPU_IDLE_BEFORE=$((tcp_cpu_idle + tcp_cpu_iowait))
-"$IPERF" -c "$TARGET" -p 5201 -P __STREAMS__ -w 4M -Z -t __DURATION__ --json >"$TCP_REPORT"
+"$IPERF" -c "$TARGET" -p 5201 -P __STREAMS__ -w 4M -Z -t __DURATION__ __REVERSE__ --json >"$TCP_REPORT"
 read -r _ tcp_cpu_user tcp_cpu_nice tcp_cpu_system tcp_cpu_idle tcp_cpu_iowait tcp_cpu_irq tcp_cpu_softirq tcp_cpu_steal _ </proc/stat
 TCP_CPU_TOTAL_AFTER=$((tcp_cpu_user + tcp_cpu_nice + tcp_cpu_system + tcp_cpu_idle + tcp_cpu_iowait + tcp_cpu_irq + tcp_cpu_softirq + tcp_cpu_steal))
 TCP_CPU_IDLE_AFTER=$((tcp_cpu_idle + tcp_cpu_iowait))
@@ -165,7 +168,7 @@ run_udp() {
   local report=$3
   local stream_rate_mbps=$(( (target_mbps + UDP_STREAMS - 1) / UDP_STREAMS ))
   "$IPERF" -c "$TARGET" -p 5201 -u -P "$UDP_STREAMS" -b "${stream_rate_mbps}M" \
-    -l __UDP_DATAGRAM_BYTES__ -t "$duration" --gsro --json >"$report"
+    -l __UDP_DATAGRAM_BYTES__ -t "$duration" __REVERSE__ --gsro --json >"$report"
 }
 
 UDP_STREAM_RATE_MBPS=$(( (UDP_TARGET_MBPS + UDP_STREAMS - 1) / UDP_STREAMS ))
@@ -200,6 +203,8 @@ tcp_cpu = tcp_report["end"].get("cpu_utilization_percent", {})
 udp_end = udp_report["end"]
 udp_sent = udp_end.get("sum_sent") or udp_end["sum"]
 udp_received = udp_end.get("sum_received") or udp_end["sum"]
+if tcp_received["bits_per_second"] <= 0 or udp_received["bits_per_second"] <= 0:
+    raise RuntimeError("Benchmark completed without receiving traffic")
 udp_cpu = udp_end.get("cpu_utilization_percent", {})
 udp_streams = int(sys.argv[5])
 vcpu_count = int(sys.argv[6])
@@ -246,6 +251,7 @@ PYEOF
      -replace '__UDP_AUTO_PERCENT__', $udpAutoPercent `
      -replace '__UDP_DATAGRAM_BYTES__', $UdpDatagramBytes `
      -replace '__DURATION__', $DurationSeconds
+  $clientScript = $clientScript -replace '__REVERSE__', $(if ($Reverse) { '-R' } else { '' })
 
   $clientResult = Invoke-VmShellScript -VmName $clientVmName -Script $clientScript
 
@@ -256,11 +262,23 @@ PYEOF
     throw "Could not parse throughput output. stdout: $($clientResult.Stdout) stderr: $($clientResult.Stderr)"
   }
 
+  if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+    [pscustomobject]@{
+      timestampUtc = [DateTime]::UtcNow.ToString('o')
+      resourceGroup = $ResourceGroupName
+      path = $Path
+      reverse = $Reverse.IsPresent
+      parallelConnections = $ParallelConnections
+      result = $result
+    } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $OutputPath -Encoding utf8
+  }
+
   Write-Host ''
   Write-Host "===================== $Path throughput =====================" -ForegroundColor Cyan
   Write-Host "  client       : $clientVmName"
   Write-Host "  server       : $serverVmName ($targetIp)"
   Write-Host "  route        : $($result.route)" -ForegroundColor Green
+  Write-Host "  direction    : $(if ($Reverse) { 'server -> client' } else { 'client -> server' })"
   Write-Host ''
   Write-Host '  TCP'
   Write-Host ("    duration    : {0:N1} seconds" -f $result.tcp.seconds)
@@ -286,7 +304,10 @@ PYEOF
 }
 finally {
   try {
-    Invoke-VmShellScript -VmName $serverVmName -Script "pkill -f 'iperf3 -s' 2>/dev/null || true; echo stopped" | Out-Null
+    $stopResult = Invoke-VmShellScript -VmName $serverVmName -Script 'set -e; systemctl stop wireguard-throughput-iperf; echo IPERF_SERVER_STOPPED'
+    if ($stopResult.Stdout -notmatch 'IPERF_SERVER_STOPPED') {
+      throw "Server cleanup failed. stdout: $($stopResult.Stdout) stderr: $($stopResult.Stderr)"
+    }
   }
   catch {
     Write-Warning "Could not stop iperf3 on '$serverVmName': $($_.Exception.Message)"

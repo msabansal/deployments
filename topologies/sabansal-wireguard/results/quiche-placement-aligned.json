@@ -1,0 +1,241 @@
+{
+  "protocol": "HTTP/3 over QUIC v1 / TLS 1.3 / UDP (cloudflare/quiche)",
+  "bytes_received": 19186922256,
+  "duration_seconds": 20,
+  "measurement_start_unix_seconds": 1791258019.837674,
+  "connections": 4,
+  "server_workers": 2,
+  "streams_per_connection": 1,
+  "warmup_seconds": 5,
+  "pin_processes": true,
+  "available_cpus": [
+    0,
+    1
+  ],
+  "receiver_results": [
+    {
+      "bytes_received": 5848940698,
+      "duration_seconds": 20,
+      "bits_per_second": 2339576279.2,
+      "cipher": "AES128_GCM",
+      "alpn": "h3",
+      "tls_version": "TLSv1.3",
+      "early_data": false,
+      "certificate_verified": true,
+      "warmup_received_seconds": 7.875074583,
+      "transport_recv_bytes": 8443429815,
+      "transport_sent_bytes": 16830082,
+      "lost_packets": 0,
+      "udp_receive_calls": 762670,
+      "gro_batches_received": 617735,
+      "process_index": 0,
+      "process_id": 33166,
+      "cpu_affinity": [
+        0
+      ]
+    },
+    {
+      "bytes_received": 3596575606,
+      "duration_seconds": 20,
+      "bits_per_second": 1438630242.4,
+      "cipher": "AES128_GCM",
+      "alpn": "h3",
+      "tls_version": "TLSv1.3",
+      "early_data": false,
+      "certificate_verified": true,
+      "warmup_received_seconds": 7.8621094110000005,
+      "transport_recv_bytes": 5189942481,
+      "transport_sent_bytes": 1870591,
+      "lost_packets": 0,
+      "udp_receive_calls": 492289,
+      "gro_batches_received": 408364,
+      "process_index": 1,
+      "process_id": 33167,
+      "cpu_affinity": [
+        1
+      ]
+    },
+    {
+      "bytes_received": 5846732544,
+      "duration_seconds": 20,
+      "bits_per_second": 2338693017.6,
+      "cipher": "AES128_GCM",
+      "alpn": "h3",
+      "tls_version": "TLSv1.3",
+      "early_data": false,
+      "certificate_verified": true,
+      "warmup_received_seconds": 7.874959591,
+      "transport_recv_bytes": 8438433329,
+      "transport_sent_bytes": 16664163,
+      "lost_packets": 0,
+      "udp_receive_calls": 666349,
+      "gro_batches_received": 534858,
+      "process_index": 2,
+      "process_id": 33168,
+      "cpu_affinity": [
+        0
+      ]
+    },
+    {
+      "bytes_received": 3894673408,
+      "duration_seconds": 20,
+      "bits_per_second": 1557869363.2,
+      "cipher": "AES128_GCM",
+      "alpn": "h3",
+      "tls_version": "TLSv1.3",
+      "early_data": false,
+      "certificate_verified": true,
+      "warmup_received_seconds": 7.857841311,
+      "transport_recv_bytes": 5622862691,
+      "transport_sent_bytes": 2037874,
+      "lost_packets": 0,
+      "udp_receive_calls": 512881,
+      "gro_batches_received": 421380,
+      "process_index": 3,
+      "process_id": 33169,
+      "cpu_affinity": [
+        1
+      ]
+    }
+  ],
+  "client_cpu": {
+    "vm_cpu_percent": 83.36301195624523,
+    "cpu_observation_seconds": 20.00683896100236,
+    "measurement_start_unix_seconds": 1791258019.837674
+  },
+  "build": {
+    "quiche_version": "0.30.0",
+    "source_commit": "be47c5011215b9f13bad06bd7627d3ae49888a19",
+    "source_url": "https://github.com/cloudflare/quiche",
+    "release_url": "https://github.com/cloudflare/quiche/releases/tag/0.30.0",
+    "instrumentation_sha256": "f09a099abe4a8cfd718cf95f3eb6f6c5da43f79957ee6ffd19e31ce802103d8e",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25) (Azure Linux 1.94.1-8.azl4)",
+    "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24) (Azure Linux 1.94.1-8.azl4)",
+    "rustflags": "-C target-cpu=native",
+    "cflags": "-O3 -march=native",
+    "release_lto": "thin",
+    "codegen_units": 1,
+    "crypto_backend": "BoringSSL (boring crate, Cargo.lock)",
+    "cpu_model": "AMD EPYC 9V45 96-Core Processor"
+  },
+  "bits_per_second": 7674768902.4,
+  "server_cpu": {
+    "vm_cpu_percent": 87.81523096129837,
+    "cpu_observation_seconds": 20.0003560450059,
+    "measurement_start_unix_seconds": 1791258019.837674
+  },
+  "server_build": {
+    "quiche_version": "0.30.0",
+    "source_commit": "be47c5011215b9f13bad06bd7627d3ae49888a19",
+    "source_url": "https://github.com/cloudflare/quiche",
+    "release_url": "https://github.com/cloudflare/quiche/releases/tag/0.30.0",
+    "instrumentation_sha256": "f09a099abe4a8cfd718cf95f3eb6f6c5da43f79957ee6ffd19e31ce802103d8e",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25) (Azure Linux 1.94.1-8.azl4)",
+    "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24) (Azure Linux 1.94.1-8.azl4)",
+    "rustflags": "-C target-cpu=native",
+    "cflags": "-O3 -march=native",
+    "release_lto": "thin",
+    "codegen_units": 1,
+    "crypto_backend": "BoringSSL (boring crate, Cargo.lock)",
+    "cpu_model": "AMD EPYC 9V45 96-Core Processor"
+  },
+  "server_runtime": {
+    "gso_enabled": true,
+    "pacing_enabled": false,
+    "max_udp_payload": 1472,
+    "pin_processes": true,
+    "available_cpus": [
+      0,
+      1
+    ],
+    "workers": [
+      {
+        "index": 0,
+        "port": 4433,
+        "process_id": 48334,
+        "cpu_affinity": [
+          0
+        ],
+        "gso_enabled": true,
+        "pacing_enabled": false,
+        "max_udp_payload": 1472
+      },
+      {
+        "index": 1,
+        "port": 4434,
+        "process_id": 48336,
+        "cpu_affinity": [
+          1
+        ],
+        "gso_enabled": true,
+        "pacing_enabled": false,
+        "max_udp_payload": 1472
+      }
+    ],
+    "gso_sendmsg_calls": 578791
+  },
+  "settings": {
+    "congestion_control": "cubic",
+    "connection_window_bytes": 67108864,
+    "stream_window_bytes": 4194304,
+    "max_udp_payload_bytes": 1472,
+    "initial_cwnd_packets": 32,
+    "gso_requested": true,
+    "gro_requested": true,
+    "pacing_requested": false,
+    "pin_processes_requested": true,
+    "server_process_affinities": [
+      {
+        "process_index": 0,
+        "process_id": 48334,
+        "cpu_ids": [
+          0
+        ]
+      },
+      {
+        "process_index": 1,
+        "process_id": 48336,
+        "cpu_ids": [
+          1
+        ]
+      }
+    ],
+    "reverse": false,
+    "setup_only": false,
+    "keep_server_running_requested": true,
+    "underlay_mtu": 1500,
+    "client_process_affinities": [
+      {
+        "process_index": 0,
+        "process_id": 33166,
+        "cpu_ids": [
+          0
+        ]
+      },
+      {
+        "process_index": 1,
+        "process_id": 33167,
+        "cpu_ids": [
+          1
+        ]
+      },
+      {
+        "process_index": 2,
+        "process_id": 33168,
+        "cpu_ids": [
+          0
+        ]
+      },
+      {
+        "process_index": 3,
+        "process_id": 33169,
+        "cpu_ids": [
+          1
+        ]
+      }
+    ]
+  },
+  "server_vm": "sabansal-wireguard-server",
+  "client_vm": "sabansal-wireguard-client",
+  "target_ip": "10.70.0.4"
+}

@@ -4,13 +4,26 @@ param(
 
   [string] $Location = 'westus3',
 
+  [ValidateSet('', '1', '2', '3')]
+  [string] $AvailabilityZone = '',
+
   [string] $SshPublicKeyPath = '~\.ssh\id_ed25519.pub',
+
+  [switch] $OptimizeThroughput,
+
+  [ValidateSet('WireGuard', 'Quiche')]
+  [string] $Transport = 'WireGuard',
+
+  [switch] $QuicheBusyPolling,
 
   [switch] $SkipThroughputTest
 )
 
 $ErrorActionPreference = 'Stop'
 $deploymentName = 'sabansal-wireguard'
+if ($QuicheBusyPolling -and $Transport -ne 'Quiche') {
+  throw '-QuicheBusyPolling requires -Transport Quiche.'
+}
 
 function Invoke-VmShellScript {
   param(
@@ -82,7 +95,9 @@ az deployment group create `
   --name $deploymentName `
   --template-file "$PSScriptRoot\main.bicep" `
   --parameters "$PSScriptRoot\main.bicepparam" `
-  --parameters "location=$Location" "adminPublicKey=$publicKey" `
+  --parameters "location=$Location" "availabilityZone=$AvailabilityZone" `
+    "optimizeThroughput=$($OptimizeThroughput.IsPresent.ToString().ToLowerInvariant())" `
+    "quicheBusyPolling=$($QuicheBusyPolling.IsPresent.ToString().ToLowerInvariant())" "transport=$Transport" "adminPublicKey=$publicKey" `
   --output none
 
 if ($LASTEXITCODE -ne 0) {
@@ -106,6 +121,21 @@ $serverPrivateIp = $outputs.serverPrivateIp.value
 $serverTunnelIp = $outputs.serverTunnelIp.value
 $clientTunnelIp = $outputs.clientTunnelIp.value
 
+if ($Transport -eq 'Quiche') {
+  $quicheParameters = @{
+    ResourceGroupName = $ResourceGroupName
+    DeploymentName = $deploymentName
+    KeepServerRunning = $true
+    DisablePacing = $OptimizeThroughput.IsPresent
+  }
+  if ($SkipThroughputTest) {
+    $quicheParameters.SetupOnly = $true
+  }
+  & "$PSScriptRoot\test-quiche-throughput.ps1" @quicheParameters
+  Write-Host "quiche client/server ready: $clientVmName -> $serverVmName ($serverPrivateIp); WireGuard is stopped." -ForegroundColor Green
+  return
+}
+
 $serverKeyResult = Invoke-VmShellScript -VmName $serverVmName -Script 'cat /etc/wireguard/publickey'
 $clientKeyResult = Invoke-VmShellScript -VmName $clientVmName -Script 'cat /etc/wireguard/publickey'
 
@@ -123,6 +153,7 @@ cat >/etc/wireguard/wg0.conf <<EOF
 [Interface]
 Address = __SERVER_TUNNEL_IP__/24
 MTU = 1440
+__TUNING_POSTUP__
 ListenPort = 51820
 PrivateKey = ${PRIVATE_KEY}
 
@@ -133,9 +164,12 @@ EOF
 chmod 600 /etc/wireguard/wg0.conf
 systemctl enable wg-quick@wg0
 systemctl restart wg-quick@wg0
+__TUNING_AFFINITY_CHECK__
 wg show wg0
 echo WIREGUARD_SERVER_CONFIGURED
-'@ -replace '__SERVER_TUNNEL_IP__', $serverTunnelIp `
+'@ -replace '__TUNING_POSTUP__', $(if ($OptimizeThroughput) { 'PostUp = /usr/local/sbin/configure-wireguard-throughput --tunnel-only' } else { '' }) `
+   -replace '__TUNING_AFFINITY_CHECK__', $(if ($OptimizeThroughput) { 'systemctl start wireguard-receive-affinity.service' } else { '' }) `
+   -replace '__SERVER_TUNNEL_IP__', $serverTunnelIp `
    -replace '__CLIENT_TUNNEL_IP__', $clientTunnelIp `
    -replace '__CLIENT_PUBLIC_KEY__', $clientKeyResult.Stdout.Trim()
 
@@ -146,6 +180,7 @@ cat >/etc/wireguard/wg0.conf <<EOF
 [Interface]
 Address = __CLIENT_TUNNEL_IP__/24
 MTU = 1440
+__TUNING_POSTUP__
 PrivateKey = ${PRIVATE_KEY}
 
 [Peer]
@@ -157,10 +192,13 @@ EOF
 chmod 600 /etc/wireguard/wg0.conf
 systemctl enable wg-quick@wg0
 systemctl restart wg-quick@wg0
+__TUNING_AFFINITY_CHECK__
 ping -c 3 -W 3 __SERVER_TUNNEL_IP__
 wg show wg0
 echo WIREGUARD_CLIENT_CONFIGURED
-'@ -replace '__CLIENT_TUNNEL_IP__', $clientTunnelIp `
+'@ -replace '__TUNING_POSTUP__', $(if ($OptimizeThroughput) { 'PostUp = /usr/local/sbin/configure-wireguard-throughput --tunnel-only' } else { '' }) `
+   -replace '__TUNING_AFFINITY_CHECK__', $(if ($OptimizeThroughput) { 'systemctl start wireguard-receive-affinity.service' } else { '' }) `
+   -replace '__CLIENT_TUNNEL_IP__', $clientTunnelIp `
    -replace '__SERVER_TUNNEL_IP__', $serverTunnelIp `
    -replace '__SERVER_PRIVATE_IP__', $serverPrivateIp `
    -replace '__SERVER_PUBLIC_KEY__', $serverKeyResult.Stdout.Trim()
