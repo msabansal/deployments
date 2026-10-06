@@ -9,6 +9,8 @@ param(
 
   [string] $SshPublicKeyPath = '~\.ssh\id_ed25519.pub',
 
+  [string] $VmSize = 'Standard_D2als_v7',
+
   [switch] $OptimizeThroughput,
 
   [ValidateSet('WireGuard', 'Quiche')]
@@ -88,14 +90,14 @@ if ($LASTEXITCODE -ne 0) {
   throw "Resource group creation failed with exit code $LASTEXITCODE."
 }
 
-Write-Host "Deploying two Standard_D2als_v7 Azure Linux VMs in $Location..."
+Write-Host "Deploying two $VmSize Azure Linux VMs in $Location..."
 
 az deployment group create `
   --resource-group $ResourceGroupName `
   --name $deploymentName `
   --template-file "$PSScriptRoot\main.bicep" `
   --parameters "$PSScriptRoot\main.bicepparam" `
-  --parameters "location=$Location" "availabilityZone=$AvailabilityZone" `
+  --parameters "location=$Location" "availabilityZone=$AvailabilityZone" "vmSize=$VmSize" `
     "optimizeThroughput=$($OptimizeThroughput.IsPresent.ToString().ToLowerInvariant())" `
     "quicheBusyPolling=$($QuicheBusyPolling.IsPresent.ToString().ToLowerInvariant())" "transport=$Transport" "adminPublicKey=$publicKey" `
   --output none

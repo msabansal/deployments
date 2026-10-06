@@ -52,6 +52,8 @@ VM CPU; its gains vary between runs.
 | `quiche-crypto-profile.txt` | System-wide CPU-clock profile under encrypted load |
 | `quiche-kernel-txpath-trials.txt` | 20-second qdisc and direct-VF-route comparisons; VF `noqueue` retained |
 | `quiche-vf-noqueue-post-reboot.json` | 20-second run after reboot with persistent VF `noqueue` (9.55 Gbps) |
+| `quinn-f2-trials.txt` | `Standard_F2als_v7` quinn trials (upstream and patched GSO caps) and quiche/TCP comparisons |
+| `quinn-f2-{stock-forward,gsocap44-forward,gsocap44-reverse}.json` | 30-second `test-quinn-throughput.ps1` runs on `Standard_F2als_v7` |
 
 Older comparisons can have different flow-control settings; use each JSON's
 `settings` for its actual configuration rather than assuming all runs differ

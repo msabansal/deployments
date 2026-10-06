@@ -23,7 +23,8 @@ Defaults:
 
 - Resource group: `sabansal-wireguard-rg`
 - Region: `westus3`
-- VM size: `Standard_D2als_v7`
+- VM size: `Standard_D2als_v7` (override with `-VmSize`, for example
+  `-VmSize Standard_F2als_v7`)
 - Server private IP: `10.70.0.4`
 - Client private IP: `10.70.0.5`
 - Server tunnel IP: `10.200.0.1`
@@ -324,6 +325,59 @@ and buffer-lifetime integration rather than a safe flag on the existing sender.
 More physical cores and a kernel-bypass sender are architectural options for
 further investigation, not measured improvements on this VM size. Neither
 guarantees 10 Gbps without a new end-to-end benchmark.
+
+## quinn throughput
+
+`test-quinn-throughput.ps1` measures QUIC goodput with the upstream
+[quinn](https://github.com/quinn-rs/quinn) `perf` crate. It is a raw QUIC
+stream benchmark (TLS 1.3 via rustls/ring, AES-128-GCM), not HTTP/3. The
+measurements below used `Standard_F2als_v7`:
+
+```powershell
+.\deploy.ps1 -ResourceGroupName sabansal-wireguard-sea-rg `
+  -Location southeastasia -AvailabilityZone 1 -OptimizeThroughput `
+  -VmSize Standard_F2als_v7
+.\test-quinn-throughput.ps1 -ResourceGroupName sabansal-wireguard-sea-rg
+```
+
+`quinn-benchmark/install.sh` builds a pinned quinn commit on both VMs under
+`/var/tmp` (about five minutes) and installs two binaries in
+`/opt/quinn-perf/bin`:
+
+- `quinn-perf`: unmodified upstream.
+- `quinn-perf-gsocap`: adds `QUINN_MAX_TRANSMIT_SEGMENTS` and
+  `QUINN_MAX_TRANSMIT_DATAGRAMS` environment overrides for the two per-send
+  batching constants in `quinn/src/connection.rs`. This is a local patch, not
+  an upstream option.
+
+The install is skipped when the script fingerprint matches; use `-SkipInstall`
+to skip the check. The wrapper stops `quiche-benchmark` during the run and
+restarts it afterwards. Use `-Build stock` for upstream, `-Reverse` for
+client-to-server, and `-Pairs` to change the number of connections.
+
+`quinn-perf` runs on a single-threaded Tokio runtime, so the wrapper starts one
+server/client process pair per connection (ports 5433 and up). Three pairs
+spread load over both vCPUs; one pair reached only 5.5 Gbps.
+
+quinn already uses GSO (`UDP_SEGMENT`) and GRO (`UDP_GRO`). strace shows
+14,720-byte `sendmsg` calls (10 × 1472) and coalesced `recvmmsg` reads. Upstream
+limits one GSO send to 10 segments and one drive call to 20 datagrams, which
+costs about 10× more syscalls than one full 64 KiB send. Raising the segment
+cap to 44 (44 × 1472 = 64,768 bytes, the largest that fits in one UDP GSO send)
+gave the largest improvement. A cap of 64 exceeds the 64 KiB limit and collapses
+throughput to about 0.2 Gbps.
+
+| quinn configuration, 3 pairs, 30 s | Server to client | Client to server |
+|---|---:|---:|
+| Upstream (segments 10, datagrams 20) | 10.5–10.9 Gbps | 10.9 Gbps |
+| Segments 20, datagrams 40 | 12.3–12.4 Gbps | — |
+| Segments 32, datagrams 64 | 12.9–13.0 Gbps | — |
+| **Segments 44, datagrams 88** (default) | **13.3–13.6 Gbps** | **13.4–13.5 Gbps** |
+
+On the same F2 VMs, quiche HTTP/3 measured 11.3–11.8 Gbps and direct TCP 15.6
+Gbps. Both VMs ran at about 85–90% CPU. quinn needs busy polling: with
+`net.core.busy_poll=0` it fell from about 10 to 8 Gbps. Pinning, 32 MiB socket
+buffers, BBR, and ACK frequency did not help. See `results/quinn-f2-trials.txt`.
 
 ## HTTP/3 throughput
 

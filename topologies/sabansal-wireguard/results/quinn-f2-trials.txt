@@ -1,0 +1,41 @@
+quinn-perf trials on two Standard_F2als_v7 VMs, Southeast Asia zone 1, MTU 1500
+quinn commit 7616e6b2782722f3ce4a1b181ef08817d7f545e4, perf crate, ring AES-128-GCM, Cubic,
+UDP payload 1472, 64M connection / 16M stream windows, 8M socket buffers, busy poll 50,
+ens1 noqueue unless stated. Each pair is one single-threaded server/client process pair.
+Goodput is the sum of client-received stream bytes per second across pairs.
+
+Stock quinn (MAX_TRANSMIT_SEGMENTS=10, MAX_TRANSMIT_DATAGRAMS=20), 20 s unless stated
+p1: 5.455 Gbit/s (pairs=1 bi=1 cc=cubic rev=False) client CPU 48.1%, server CPU 44.7%
+p2: 10.718 Gbit/s (pairs=2 bi=1 cc=cubic rev=False) client CPU 85.5%, server CPU 83%
+p4: 10.720 Gbit/s (pairs=4 bi=1 cc=cubic rev=False) client CPU 84.2%, server CPU 86.6%
+ackfreq: 9.542 Gbit/s (pairs=2 bi=1 cc=cubic rev=False) client CPU 84.2%, server CPU 83.4%
+bbr: 9.475 Gbit/s (pairs=2 bi=1 cc=bbr rev=False) client CPU 84.5%, server CPU 84.3%
+reverse: 10.055 Gbit/s (pairs=2 bi=1 cc=cubic rev=True) client CPU 83.8%, server CPU 85%
+bp0: 8.046 Gbit/s (pairs=2 bi=1 cc=cubic rev=False) client CPU 76.8%, server CPU 71.7%
+bp0-ackfreq: 7.722 Gbit/s (pairs=2 bi=1 cc=cubic rev=False) client CPU 78.3%, server CPU 69.9%
+pin: 9.912 Gbit/s (pairs=2 bi=1 cc=cubic rev=False pin=True buf=8M) client CPU 84.5%, server CPU 84.6%
+buf32: 10.052 Gbit/s (pairs=2 bi=1 cc=cubic rev=False pin=False buf=32M) client CPU 85.5%, server CPU 84.7%
+nopin-repeat: 9.864 Gbit/s (pairs=2 bi=1 cc=cubic rev=False pin=False buf=8M) client CPU 84.8%, server CPU 83.6%
+pin-repeat: 9.417 Gbit/s (pairs=2 bi=1 cc=cubic rev=False pin=True buf=8M) client CPU 86.7%, server CPU 85.3%
+3 pairs 30 s: 10.87, 10.92 Gbps
+4 pairs 30 s: 10.72, 10.98 Gbps
+reverse 30 s: 10.91 Gbps
+wrapper stock 3 pairs 30 s: 10.636 Gbps (quinn-f2-stock-forward.json)
+
+Patched GSO caps (quinn-perf-gsocap), 3 pairs, 30 s, Gbps
+stock 10/20 control:  10.57, 10.53
+segments 20 / datagrams 40:  12.30, 12.42
+segments 32 / datagrams 64:  12.92, 12.96
+segments 32 / datagrams 128: 12.11, 12.86
+segments 44 / datagrams 88:  13.48, 13.52, 13.59; reverse 13.45
+segments 44, 4 pairs: 13.31; 2 pairs: 12.40
+segments 64: 0.12-0.20 (64 x 1472 exceeds the 64 KiB UDP GSO send limit)
+wrapper 44/88: forward 13.305 (quinn-f2-gsocap44-forward.json), reverse 13.359 (quinn-f2-gsocap44-reverse.json)
+
+quiche 0.30.0 on the same F2 VMs, 20 s, 4 connections, 2 workers, for comparison
+busy-poll 50 cubic P4: 11.068 11.188 11.631         mean 11.30
+busy-poll 0  cubic P4: 11.742 11.785 11.783 11.311 11.269(30s) mean 11.58
+bbr bp50: 11.724 11.487 11.554 | bbr bp0: 11.800 10.088
+bp0 P2 8.924 | P6 11.634 | P8(bp50) 10.813 | pinned 9.742 | align 11.360 | align+pin 11.162
+bp0 P4 reverse: 12.324 (client 97.8%, server 99.8%)
+Direct TCP baseline on F2: 15.6 Gbps

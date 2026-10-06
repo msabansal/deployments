@@ -13,7 +13,7 @@ param adminUsername string = 'azureuser'
 @secure()
 param adminPublicKey string
 
-@description('VM size. Standard_D2als_v7 requires an NVMe disk controller.')
+@description('VM size. The v7 sizes used here require an NVMe disk controller.')
 param vmSize string = 'Standard_D2als_v7'
 
 @description('Availability zone for both VMs, or empty for a regional deployment.')

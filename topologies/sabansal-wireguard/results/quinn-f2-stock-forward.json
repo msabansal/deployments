@@ -1,0 +1,27 @@
+{
+  "measured_at": "2026-10-06T11:55:07.5897521Z",
+  "direction": "server-to-client",
+  "build": "stock",
+  "quinn": {
+    "repository": "https://github.com/quinn-rs/quinn",
+    "commit": "7616e6b2782722f3ce4a1b181ef08817d7f545e4",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25) (Azure Linux 1.94.1-8.azl4)"
+  },
+  "max_transmit_segments": 10,
+  "max_transmit_datagrams": 20,
+  "pairs": 3,
+  "duration_seconds": 30,
+  "congestion_control": "cubic",
+  "connection_window": "64M",
+  "stream_window": "16M",
+  "socket_buffer": "8M",
+  "max_udp_payload_bytes": 1472,
+  "goodput_gbps": 10.636,
+  "per_connection_gbps": [
+    3.953,
+    3.339,
+    3.343
+  ],
+  "client_cpu_percent": 86.2,
+  "server_cpu_percent": 88.8
+}
