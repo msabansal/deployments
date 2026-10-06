@@ -163,8 +163,12 @@ configuration, installs the quiche benchmark on both VMs, and retains its server
 as a boot-time service. `-SkipThroughputTest` skips measurement, not application
 setup. The default transport remains `WireGuard`. With
 `-OptimizeThroughput`, `quiche-throughput.service` persistently enables supported
-NIC offloads, sets MANA RX/TX rings to 2,048/4,096, and restores balanced RSS
-across the receive queues. It retains normal IRQ balancing rather than applying
+NIC offloads, sets MANA RX/TX rings to 2,048/4,096, restores balanced RSS
+across the receive queues, and replaces the MANA VF's root qdisc with `noqueue`.
+A udev rule (`90-quiche-mana-vf.rules`) restarts the service whenever the VF is
+re-added, for example after Azure host servicing, so this tuning is reapplied.
+The synthetic netvsc interface (`eth0`) keeps its default `mq` / `fq_codel`
+qdisc. It retains normal IRQ balancing rather than applying
 the WireGuard-specific CPU placement.
 The underlay remains at MTU 1,500; larger UDP payload settings must not exceed
 1,472 bytes on this direct IPv4 path.
@@ -285,14 +289,29 @@ connection/stream profile:
 | IRQ/XPS alignment without pinning | 8.33 Gbps | Not retained |
 | IRQ/XPS alignment with pinning | 7.67 Gbps | Not retained |
 | Larger RX/TX rings, up to 8,192 / 16,384 | 8.26-8.74 Gbps | No gain; restored 2,048 / 4,096 |
-| Root or per-queue `fq` | 7.71-8.31 Gbps | Restored `mq` / `fq_codel` |
+| Root or per-queue `fq` | 7.71-8.31 Gbps | Not retained |
 | Kernel busy polling, 50 microseconds | 8.91 / 9.13 Gbps | Explicit opt-in; near-100% receiver CPU |
+| `noqueue` on the MANA VF (`ens1`) | 8.66-9.33 Gbps, mean 9.10 (n=7) vs 8.47 (n=5) | Retained with `-OptimizeThroughput` |
+| `noqueue` on both `eth0` and the VF | 9.10 / 9.16 Gbps | No clear gain over VF only; not retained |
+| Route peer traffic directly via the VF, plus VF `noqueue` | 9.14-9.42 Gbps, mean 9.31 (n=5) | Not retained; unsupported |
 
 Placement and ring trials used 20-second windows; the busy-poll comparison
-used 30 seconds in both directions. These are observed runs, not statistical
+used 30 seconds in both directions. The qdisc and VF-route trials used
+20-second server-to-client runs with busy polling enabled. These are observed runs, not statistical
 confidence intervals. Normal `irqbalance`, automatic process placement, and
 default XPS masks remain selected. More queues, interrupt coalescing, hardware
 UDP segmentation, and TLS offload cannot be enabled on this VM datapath.
+
+With Accelerated Networking, every transmitted packet passes through two
+qdiscs: one on the synthetic netvsc interface and one on the MANA VF. In the
+sender profile, paravirtual spinlock release accounted for about 11% of samples.
+Removing the VF's redundant qdisc kept queueing on `eth0` and raised mean
+goodput by about 7%. After rebooting both VMs with this setting persisted, a
+20-second server-to-client run measured 9.55 Gbps. Sending through the VF directly with a static neighbor
+(`12:34:56:78:9a:bc`), a `/32` route on `ens1`, and loose `rp_filter` added about
+2% more. It is not retained because Azure can revoke the VF during host
+servicing; that route would then black-hole peer traffic instead of falling
+back to the synthetic path. Loose reverse-path filtering is also weaker.
 
 MANA's [DPDK poll-mode driver](https://doc.dpdk.org/guides/nics/mana.html)
 provides a kernel-bypass option. The VMs expose MANA RDMA devices and have the

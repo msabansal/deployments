@@ -78,8 +78,11 @@ ethtool -G "$vf" rx 2048 tx 4096
 if [ "${1:-}" = "--nic-only" ]; then
   receive_queues=("/sys/class/net/$vf"/queues/rx-*)
   ethtool -X "$vf" equal "${#receive_queues[@]}"
+  # The synthetic netvsc device already has a qdisc; a second one on the VF only adds lock overhead.
+  tc qdisc replace dev "$vf" root noqueue
   ethtool -g "$vf"
-  echo "NIC offloads, rings, and balanced RSS applied without changing IRQ affinity or MTU"
+  tc qdisc show dev "$vf"
+  echo "NIC offloads, rings, balanced RSS, and VF noqueue applied without changing IRQ affinity or MTU"
   exit 0
 fi
 

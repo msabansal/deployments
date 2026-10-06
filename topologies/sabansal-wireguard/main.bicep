@@ -202,6 +202,11 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 TUNING_UNIT
+# Azure can remove and re-add the MANA VF during host servicing; reapply VF tuning when it returns.
+cat >/etc/udev/rules.d/90-quiche-mana-vf.rules <<'UDEV_RULE'
+ACTION=="add", SUBSYSTEM=="net", DRIVERS=="mana", RUN+="/usr/bin/systemctl --no-block restart quiche-throughput.service"
+UDEV_RULE
+udevadm control --reload
 systemctl daemon-reload
 systemctl enable quiche-throughput.service
 systemctl restart quiche-throughput.service
@@ -212,6 +217,17 @@ var quicheDisableScript = '''
 if [ -f /etc/systemd/system/quiche-throughput.service ]; then
   systemctl disable --now quiche-throughput.service
 fi
+if [ -f /etc/udev/rules.d/90-quiche-mana-vf.rules ]; then
+  rm /etc/udev/rules.d/90-quiche-mana-vf.rules
+  udevadm control --reload
+fi
+for path in /sys/class/net/*; do
+  if ethtool -i "${path##*/}" 2>/dev/null | grep -qx 'driver: mana' \
+      && tc qdisc show dev "${path##*/}" root | grep -q '^qdisc noqueue'; then
+    tc qdisc del dev "${path##*/}" root
+    echo "${path##*/}: default qdisc restored"
+  fi
+done
 '''
 
 var quicheModeScript = '''

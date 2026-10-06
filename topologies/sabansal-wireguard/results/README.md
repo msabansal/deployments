@@ -50,6 +50,8 @@ VM CPU; its gains vary between runs.
 | `quiche-boot-server-direct-proof.json` | Five-second transfer using the boot-started server without a wrapper restart |
 | `quiche-post-reboot-*.txt` | Post-reboot services, MTU, rings, RSS, XPS, and busy-poll observations |
 | `quiche-crypto-profile.txt` | System-wide CPU-clock profile under encrypted load |
+| `quiche-kernel-txpath-trials.txt` | 20-second qdisc and direct-VF-route comparisons; VF `noqueue` retained |
+| `quiche-vf-noqueue-post-reboot.json` | 20-second run after reboot with persistent VF `noqueue` (9.55 Gbps) |
 
 Older comparisons can have different flow-control settings; use each JSON's
 `settings` for its actual configuration rather than assuming all runs differ
